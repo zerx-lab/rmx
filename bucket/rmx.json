@@ -6,7 +6,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/zerx-lab/rmx/releases/download/v0.1.0/rmx-0.1.0-x86_64-pc-windows-msvc.zip",
-            "hash": ""
+            "hash": "e67185f735cb1fb31b9656abd78d66568464b42c5aed6b2791a446e87b4ef8db"
         }
     },
     "bin": "rmx.exe",
