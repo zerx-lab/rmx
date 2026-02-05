@@ -22,13 +22,15 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Build Release
-        run: cargo build --release --target x86_64-pc-windows-msvc
-
       - name: Get version
         id: version
         shell: bash
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build Release
+        env:
+          CI_VERSION: ${{ steps.version.outputs.version }}
+        run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Create archive
         shell: pwsh
