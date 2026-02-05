@@ -86,11 +86,27 @@ enum Command {
     Uninstall,
 }
 
+/// Setup console I/O for Windows GUI subsystem application.
+///
+/// This handles three scenarios:
+/// 1. Launched from terminal (cmd/powershell): attach to parent console, output visible
+/// 2. Launched from terminal with redirection (e.g., `rmx --help > out.txt`): use existing pipe/file handles
+/// 3. Launched from GUI (e.g., Explorer right-click): no console, no popup window
 #[cfg(windows)]
-unsafe fn reopen_stdio() {
+unsafe fn setup_console() {
     use std::ffi::CStr;
     use std::os::raw::{c_char, c_int, c_void};
+    use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileType, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
 
+    const STDIN_FILENO: c_int = 0;
     const STDOUT_FILENO: c_int = 1;
     const STDERR_FILENO: c_int = 2;
 
@@ -103,19 +119,73 @@ unsafe fn reopen_stdio() {
         fn __acrt_iob_func(index: c_int) -> *mut c_void;
     }
 
-    let conout = CStr::from_bytes_with_nul_unchecked(b"CONOUT$\0").as_ptr();
+    // Check if stdout is already valid (redirected to pipe/file)
+    // For GUI subsystem apps, handles are typically NULL unless redirected
+    let stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or(INVALID_HANDLE_VALUE);
+    let stdout_valid = !stdout_handle.is_invalid()
+        && !stdout_handle.0.is_null()
+        && GetFileType(stdout_handle).0 != 0;
+
+    if stdout_valid {
+        // stdout already has a valid handle (pipe/file redirection)
+        // Don't attach to console, just use existing handles
+        return;
+    }
+
+    // No valid stdout - try to attach to parent console (terminal scenario)
+    if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+        // No parent console (launched from GUI) - stay silent, no popup
+        return;
+    }
+
+    // Successfully attached to parent console
+    // Now setup both Windows handles (for Rust std::io) and C stdio
+
+    // Open CONOUT$ and CONIN$ for Windows handles
+    let conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+    let conin: Vec<u16> = "CONIN$\0".encode_utf16().collect();
+
+    // Setup stdout/stderr with CONOUT$
+    if let Ok(h) = CreateFileW(
+        windows::core::PCWSTR(conout.as_ptr()),
+        FILE_GENERIC_WRITE.0,
+        FILE_SHARE_WRITE,
+        None,
+        OPEN_EXISTING,
+        Default::default(),
+        None,
+    ) {
+        let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+        let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+    }
+
+    // Setup stdin with CONIN$
+    if let Ok(h) = CreateFileW(
+        windows::core::PCWSTR(conin.as_ptr()),
+        FILE_GENERIC_READ.0,
+        FILE_SHARE_READ,
+        None,
+        OPEN_EXISTING,
+        Default::default(),
+        None,
+    ) {
+        let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+    }
+
+    // Also setup C stdio (for any C library code that might use printf, etc.)
+    let conout_c = CStr::from_bytes_with_nul_unchecked(b"CONOUT$\0").as_ptr();
+    let conin_c = CStr::from_bytes_with_nul_unchecked(b"CONIN$\0").as_ptr();
     let w = CStr::from_bytes_with_nul_unchecked(b"w\0").as_ptr();
-    freopen(conout, w, __acrt_iob_func(STDOUT_FILENO));
-    freopen(conout, w, __acrt_iob_func(STDERR_FILENO));
+    let r = CStr::from_bytes_with_nul_unchecked(b"r\0").as_ptr();
+    freopen(conin_c, r, __acrt_iob_func(STDIN_FILENO));
+    freopen(conout_c, w, __acrt_iob_func(STDOUT_FILENO));
+    freopen(conout_c, w, __acrt_iob_func(STDERR_FILENO));
 }
 
 fn main() {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok() {
-            reopen_stdio();
-        }
+        setup_console();
     }
 
     let args = Args::parse();
