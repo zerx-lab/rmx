@@ -1,6 +1,9 @@
 use crate::broker::Broker;
 use crate::error::FailedItem;
-use crate::winapi::{delete_file, enumerate_files, remove_dir};
+use crate::winapi::{
+    delete_file, enumerate_files, is_file_in_use_error, kill_locking_processes, remove_dir,
+    FileEntry,
+};
 use crossbeam_channel::Receiver;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -10,6 +13,7 @@ use std::thread::{self, JoinHandle};
 pub struct WorkerConfig {
     pub verbose: bool,
     pub ignore_errors: bool,
+    pub kill_processes: bool,
 }
 
 impl Default for WorkerConfig {
@@ -17,6 +21,7 @@ impl Default for WorkerConfig {
         Self {
             verbose: false,
             ignore_errors: true,
+            kill_processes: false,
         }
     }
 }
@@ -86,6 +91,17 @@ fn worker_thread(
         }
 
         if let Err(e) = remove_dir(&dir) {
+            if config.kill_processes && is_file_in_use_error(&e) {
+                if let Ok(killed) = kill_locking_processes(&dir, config.verbose) {
+                    if !killed.is_empty() {
+                        if let Ok(()) = remove_dir(&dir) {
+                            broker.mark_complete(dir);
+                            continue;
+                        }
+                    }
+                }
+            }
+
             let msg = format!("{}", e);
             error_tracker.record_failure(FailedItem {
                 path: dir.clone(),
@@ -109,18 +125,32 @@ fn delete_files_in_dir(
     config: &WorkerConfig,
     error_tracker: &Arc<ErrorTracker>,
 ) -> std::io::Result<()> {
-    enumerate_files(dir, |path, is_dir| {
-        if !is_dir {
-            if let Err(e) = delete_file(path) {
+    enumerate_files(dir, |entry: FileEntry| {
+        if !entry.is_dir {
+            if let Err(e) = delete_file(&entry.path) {
+                if config.kill_processes && is_file_in_use_error(&e) {
+                    if let Ok(killed) = kill_locking_processes(&entry.path, config.verbose) {
+                        if !killed.is_empty() {
+                            if let Ok(()) = delete_file(&entry.path) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
                 let msg = format!("{}", e);
                 error_tracker.record_failure(FailedItem {
-                    path: path.to_path_buf(),
+                    path: entry.path.clone(),
                     error: msg.clone(),
                     is_dir: false,
                 });
 
                 if config.verbose {
-                    eprintln!("Warning: Failed to delete {}: {}", path.display(), msg);
+                    eprintln!(
+                        "Warning: Failed to delete {}: {}",
+                        entry.path.display(),
+                        msg
+                    );
                 }
             }
         }
