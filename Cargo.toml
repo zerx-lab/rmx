@@ -1,0 +1,29 @@
+[package]
+name = "rmx"
+version = "0.1.0"
+edition = "2021"
+authors = ["rmx contributors"]
+description = "Fast parallel directory deletion for Windows - blazingly fast removal of node_modules, target, and other large directories"
+license = "MIT OR Apache-2.0"
+keywords = ["filesystem", "delete", "parallel", "performance", "windows"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+crossbeam-channel = "0.5"
+dashmap = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Wdk_Storage_FileSystem",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
