@@ -1,31 +1,58 @@
-# rmx - Fast Parallel Directory Deletion for Windows
+<div align="center">
 
-A high-performance command-line tool for deleting large directories like `node_modules` and `target` on Windows.
+```
+                         
+ ██████╗ ███╗   ███╗██╗  ██╗
+ ██╔══██╗████╗ ████║╚██╗██╔╝
+ ██████╔╝██╔████╔██║ ╚███╔╝ 
+ ██╔══██╗██║╚██╔╝██║ ██╔██╗ 
+ ██║  ██║██║ ╚═╝ ██║██╔╝ ██╗
+ ╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝
+                         
+```
 
-## Performance
+# rmx
+
+**⚡ Fast Parallel Directory Deletion for Windows**
+
+*Delete `node_modules` and `target` directories at blazing speed*
+
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D6?logo=windows)](https://www.microsoft.com/windows)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
+
+[English](./README.md) | [简体中文](./README_zh-CN.md)
+
+</div>
+
+---
+
+## ✨ Performance
 
 Benchmark on 5,301 items (5,000 files, 301 directories):
 
 | Method | Time | vs rmx |
-|--------|------|--------|
-| **rmx** | 514ms | 1.00x |
+|:------:|:----:|:------:|
+| **⚡ rmx** | **514ms** | **1.00x** |
 | PowerShell Remove-Item | 1,150ms | 2.2x slower |
 
-## Why rmx is Fast
+## 🚀 Why rmx is Fast
 
-1. **POSIX Delete Semantics** - Uses `FILE_DISPOSITION_POSIX_SEMANTICS` for immediate namespace removal (Windows 10 1607+)
-2. **Parallel Deletion** - Multi-threaded workers with dependency-aware scheduling
-3. **Direct Windows API** - Bypasses high-level abstractions using `CreateFileW`, `SetFileInformationByHandle`
-4. **Long Path Support** - Handles paths >260 characters with `\\?\` prefix
-5. **Auto Retry** - Exponential backoff for locked files
+| Feature | Description |
+|---------|-------------|
+| 🔥 **POSIX Delete** | Uses `FILE_DISPOSITION_POSIX_SEMANTICS` for immediate namespace removal |
+| ⚡ **Parallel** | Multi-threaded workers with dependency-aware scheduling |
+| 🎯 **Direct API** | Bypasses high-level abstractions using native Windows API |
+| 📏 **Long Paths** | Handles paths >260 characters with `\\?\` prefix |
+| 🔄 **Auto Retry** | Exponential backoff for locked files |
 
-## Installation
+## 📦 Installation
 
 ```bash
 cargo install --path .
 ```
 
-## Usage
+## 📖 Usage
 
 ```bash
 # Delete a directory
@@ -40,32 +67,36 @@ rmx -n ./node_modules
 # Verbose mode with statistics
 rmx -v --stats ./target
 
-# Ask for confirmation
-rmx -c ./important_folder
-
-# Force deletion of dangerous paths
+# Force deletion (skip confirmation)
 rmx --force ./path
+
+# Kill processes that are locking files
+rmx -rf --kill-processes ./locked_directory
 ```
 
-## Options
+## ⚙️ Options
 
 | Option | Description |
 |--------|-------------|
+| `-r, -R, --recursive` | Remove directories and their contents recursively |
+| `-f, --force` | Force deletion without confirmation |
 | `-t, --threads <N>` | Number of worker threads (default: CPU count) |
 | `-n, --dry-run` | Scan but don't delete |
 | `-v, --verbose` | Show progress and errors |
-| `-c, --confirm` | Ask for confirmation |
 | `--stats` | Show detailed statistics |
-| `--force` | Force deletion of dangerous paths |
+| `--no-preserve-root` | Do not treat '/' specially |
+| `--kill-processes` | Kill processes locking files (use with caution) |
 
-## Safety Features
+## 🛡️ Safety Features
 
-- **System directories protected** - Cannot delete `C:\Windows`, `C:\Program Files`, etc.
-- **Home directory protected** - Cannot delete user's home directory
-- **Current directory check** - Warns when deleting CWD or its parents
-- **Confirmation option** - Use `-c` for interactive confirmation
+| Protection | Description |
+|------------|-------------|
+| 🚫 System directories | Cannot delete `C:\Windows`, `C:\Program Files`, etc. |
+| 🏠 Home directory | Cannot delete user's home directory |
+| 📂 Current directory | Warns when deleting CWD or its parents |
+| ✅ Confirmation | Asks for confirmation by default (use `-f` to skip) |
 
-## Technical Details
+## 🔧 Technical Details
 
 ### Windows API Usage
 
@@ -82,11 +113,21 @@ When a file is locked by another process:
 2. If still locked, record failure and continue with other files
 3. Report all failures at the end
 
-## Requirements
+## 📋 Requirements
 
 - Windows 10 version 1607 or later
 - NTFS filesystem
 
-## License
+## 📄 License
 
 MIT OR Apache-2.0
+
+---
+
+<div align="center">
+
+**[⬆ Back to Top](#rmx)**
+
+Made with ❤️ for Windows developers
+
+</div>
