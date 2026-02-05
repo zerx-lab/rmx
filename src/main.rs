@@ -1,4 +1,8 @@
-use clap::Parser;
+// Hide console window when launched from GUI (e.g., context menu)
+// CLI usage will attach to parent console via AttachConsole
+#![windows_subsystem = "windows"]
+
+use clap::{Parser, Subcommand};
 use rmx::{broker::Broker, error::Error, safety, tree, worker};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,9 +22,13 @@ const APP_VERSION: &str = env!("APP_VERSION");
   rmx -r ./node_modules           Delete directory (with confirmation)\n  \
   rmx -rf ./target                Force delete directory (no confirmation)\n  \
   rmx -rfv ./dist                 Force delete with verbose output\n  \
-  rmx -rf dir1 dir2 dir3          Delete multiple directories")]
+  rmx -rf dir1 dir2 dir3          Delete multiple directories\n  \
+  rmx install                     Add rmx to right-click context menu\n  \
+  rmx uninstall                   Remove rmx from right-click context menu")]
 struct Args {
-    #[arg(required = true)]
+    #[command(subcommand)]
+    command: Option<Command>,
+
     paths: Vec<PathBuf>,
 
     #[arg(
@@ -68,13 +76,108 @@ struct Args {
     kill_processes: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    #[command(about = "Add rmx to the Windows Explorer right-click context menu (requires admin)")]
+    Install,
+    #[command(
+        about = "Remove rmx from the Windows Explorer right-click context menu (requires admin)"
+    )]
+    Uninstall,
+}
+
+#[cfg(windows)]
+unsafe fn reopen_stdio() {
+    use std::ffi::CStr;
+    use std::os::raw::{c_char, c_int, c_void};
+
+    const STDOUT_FILENO: c_int = 1;
+    const STDERR_FILENO: c_int = 2;
+
+    extern "C" {
+        fn freopen(
+            filename: *const c_char,
+            mode: *const c_char,
+            stream: *mut c_void,
+        ) -> *mut c_void;
+        fn __acrt_iob_func(index: c_int) -> *mut c_void;
+    }
+
+    let conout = CStr::from_bytes_with_nul_unchecked(b"CONOUT$\0").as_ptr();
+    let w = CStr::from_bytes_with_nul_unchecked(b"w\0").as_ptr();
+    freopen(conout, w, __acrt_iob_func(STDOUT_FILENO));
+    freopen(conout, w, __acrt_iob_func(STDERR_FILENO));
+}
+
 fn main() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok() {
+            reopen_stdio();
+        }
+    }
+
     let args = Args::parse();
+
+    if let Some(command) = args.command {
+        if let Err(e) = run_command(command) {
+            eprintln!("rmx: {}", e);
+            process::exit(1);
+        }
+        return;
+    }
+
+    if args.paths.is_empty() {
+        eprintln!("rmx: missing operand");
+        eprintln!("Try 'rmx --help' for more information.");
+        process::exit(1);
+    }
 
     if let Err(e) = run(args) {
         eprintln!("rmx: {}", e);
         process::exit(e.exit_code());
     }
+}
+
+#[cfg(windows)]
+fn run_command(command: Command) -> Result<(), std::io::Error> {
+    use rmx::context_menu;
+    use std::io::{Error, ErrorKind};
+
+    match command {
+        Command::Install => match context_menu::install() {
+            Ok(()) => {
+                println!("rmx has been added to the context menu.");
+                println!("Right-click on any folder to see 'Delete with rmx'.");
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "Administrator privileges required. Run as administrator.",
+            )),
+            Err(e) => Err(e),
+        },
+        Command::Uninstall => match context_menu::uninstall() {
+            Ok(()) => {
+                println!("rmx has been removed from the context menu.");
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "Administrator privileges required. Run as administrator.",
+            )),
+            Err(e) => Err(e),
+        },
+    }
+}
+
+#[cfg(not(windows))]
+fn run_command(_command: Command) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Context menu integration is only available on Windows",
+    ))
 }
 
 fn run(args: Args) -> Result<(), Error> {

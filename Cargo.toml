@@ -21,10 +21,12 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_RestartManager",
     "Win32_System_Threading",
     "Wdk_Storage_FileSystem",
 ] }
+win-ctx = "1.4"
 
 [profile.release]
 opt-level = 3

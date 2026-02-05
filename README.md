@@ -88,6 +88,22 @@ rmx --force ./path
 rmx -rf --kill-processes ./locked_directory
 ```
 
+### Context Menu Integration
+
+Add rmx to Windows Explorer right-click menu:
+
+```powershell
+# Add to context menu (requires admin)
+rmx install
+
+# Remove from context menu (requires admin)
+rmx uninstall
+```
+
+After installation, right-click any folder to see "Delete with rmx" option.
+
+**Note:** Run PowerShell or CMD as Administrator for install/uninstall commands.
+
 ## ⚙️ Options
 
 | Option | Description |
