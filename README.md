@@ -46,9 +46,25 @@ Benchmark on 5,301 items (5,000 files, 301 directories):
 
 ## 📦 Installation
 
+### Scoop (Recommended)
+
+```powershell
+# Add the rmx bucket
+scoop bucket add rmx https://github.com/zerx-lab/rmx
+
+# Install rmx
+scoop install rmx
+```
+
+### Cargo
+
 ```bash
 cargo install --path .
 ```
+
+### Manual Download
+
+Download the latest release from [GitHub Releases](https://github.com/zerx-lab/rmx/releases).
 
 ## 📖 Usage
 

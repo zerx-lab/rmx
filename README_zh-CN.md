@@ -46,9 +46,25 @@
 
 ## 📦 安装
 
+### Scoop（推荐）
+
+```powershell
+# 添加 rmx bucket
+scoop bucket add rmx https://github.com/zerx-lab/rmx
+
+# 安装 rmx
+scoop install rmx
+```
+
+### Cargo
+
 ```bash
 cargo install --path .
 ```
+
+### 手动下载
+
+从 [GitHub Releases](https://github.com/zerx-lab/rmx/releases) 下载最新版本。
 
 ## 📖 使用方法
 

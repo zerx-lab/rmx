@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create archive
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path "release"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/rmx.exe" -Destination "release/"
+          Copy-Item "README.md" -Destination "release/"
+          Copy-Item "LICENSE*" -Destination "release/" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "release/*" -DestinationPath "rmx-$version-x86_64-pc-windows-msvc.zip"
+
+      - name: Calculate SHA256
+        id: hash
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $hash = (Get-FileHash "rmx-$version-x86_64-pc-windows-msvc.zip" -Algorithm SHA256).Hash.ToLower()
+          echo "hash=$hash" >> $env:GITHUB_OUTPUT
+          echo "SHA256: $hash"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rmx-windows
+          path: rmx-*.zip
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: rmx-*.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-scoop:
+    name: Update Scoop Manifest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rmx-windows
+
+      - name: Calculate SHA256
+        id: hash
+        run: |
+          hash=$(sha256sum rmx-*.zip | cut -d ' ' -f 1)
+          echo "hash=$hash" >> $GITHUB_OUTPUT
+
+      - name: Update Scoop manifest
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          HASH="${{ steps.hash.outputs.hash }}"
+          
+          cat > bucket/rmx.json << EOF
+          {
+              "version": "$VERSION",
+              "description": "Fast parallel directory deletion for Windows - blazingly fast removal of node_modules, target, and other large directories",
+              "homepage": "https://github.com/zerx-lab/rmx",
+              "license": "MIT|Apache-2.0",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/zerx-lab/rmx/releases/download/v$VERSION/rmx-$VERSION-x86_64-pc-windows-msvc.zip",
+                      "hash": "$HASH"
+                  }
+              },
+              "bin": "rmx.exe",
+              "checkver": "github",
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/zerx-lab/rmx/releases/download/v\$version/rmx-\$version-x86_64-pc-windows-msvc.zip"
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bucket/rmx.json
+          git diff --staged --quiet || git commit -m "chore: update scoop manifest for v${{ steps.version.outputs.version }}"
+          git push
