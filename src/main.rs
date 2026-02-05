@@ -58,6 +58,12 @@ struct Args {
 
     #[arg(long = "no-preserve-root", help = "Do not treat '/' specially")]
     no_preserve_root: bool,
+
+    #[arg(
+        long = "kill-processes",
+        help = "Kill processes that are locking files (use with caution)"
+    )]
+    kill_processes: bool,
 }
 
 fn main() {
@@ -106,6 +112,7 @@ fn run(args: Args) -> Result<(), Error> {
 struct DeletionStats {
     dirs_deleted: usize,
     files_deleted: usize,
+    total_bytes: u64,
     total_time: std::time::Duration,
 }
 
@@ -113,11 +120,31 @@ impl DeletionStats {
     fn merge(&mut self, other: &DeletionStats) {
         self.dirs_deleted += other.dirs_deleted;
         self.files_deleted += other.files_deleted;
+        self.total_bytes += other.total_bytes;
         self.total_time += other.total_time;
     }
 
     fn total_items(&self) -> usize {
         self.dirs_deleted + self.files_deleted
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
     }
 }
 
@@ -127,6 +154,7 @@ fn print_summary(stats: &DeletionStats, args: &Args) {
         println!("  Directories: {}", stats.dirs_deleted);
         println!("  Files:       {}", stats.files_deleted);
         println!("  Total:       {}", stats.total_items());
+        println!("  Size:        {}", format_bytes(stats.total_bytes));
         println!("  Time:        {:.2?}", stats.total_time);
         if stats.total_time.as_secs_f64() > 0.0 {
             let throughput = stats.total_items() as f64 / stats.total_time.as_secs_f64();
@@ -266,12 +294,13 @@ fn process_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         let dir_count = tree.dirs.len();
         let file_count = tree.file_count;
 
-        println!(
-            "rmx: descend into directory '{}' ({} files, {} directories)?",
+        eprint!(
+            "rmx: descend into directory '{}' ({} files, {} directories)? [y/N] ",
             path.display(),
             file_count,
             dir_count
         );
+        std::io::stderr().flush().ok();
 
         if !confirm_yes()? {
             return Ok(DeletionStats::default());
@@ -286,16 +315,18 @@ fn dry_run_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
 
     if args.verbose {
         println!(
-            "would remove '{}' ({} files, {} directories)",
+            "would remove '{}' ({} files, {} directories, {})",
             path.display(),
             tree.file_count,
-            tree.dirs.len()
+            tree.dirs.len(),
+            format_bytes(tree.total_bytes)
         );
     }
 
     Ok(DeletionStats {
         dirs_deleted: tree.dirs.len(),
         files_deleted: tree.file_count,
+        total_bytes: tree.total_bytes,
         ..Default::default()
     })
 }
@@ -311,6 +342,7 @@ fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
 
     let dir_count = tree.dirs.len();
     let file_count = tree.file_count;
+    let total_bytes = tree.total_bytes;
 
     let worker_count = args.threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -325,6 +357,7 @@ fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     let worker_config = worker::WorkerConfig {
         verbose: args.verbose,
         ignore_errors: true,
+        kill_processes: args.kill_processes,
     };
 
     let handles = worker::spawn_workers(
@@ -399,13 +432,14 @@ fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     Ok(DeletionStats {
         dirs_deleted: dir_count,
         files_deleted: file_count,
+        total_bytes,
         total_time: elapsed,
     })
 }
 
 fn confirm_deletion(path: &Path, is_dir: bool) -> Result<bool, Error> {
     let type_str = if is_dir { "directory" } else { "file" };
-    eprint!("rmx: remove {} '{}'? ", type_str, path.display());
+    eprint!("rmx: remove {} '{}'? [y/N] ", type_str, path.display());
     std::io::stderr().flush().ok();
     confirm_yes()
 }
