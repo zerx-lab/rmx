@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::Sizable;
 use gpui_component::progress::Progress;
 use gpui_component::Root;
 use gpui_component_assets::Assets;
@@ -22,6 +23,8 @@ pub struct DeleteProgress {
     pub is_complete: AtomicBool,
     pub is_cancelled: AtomicBool,
     pub start_time: Instant,
+    pub error_count: AtomicUsize,
+    pub last_error: parking_lot::Mutex<Option<String>>,
 }
 
 impl DeleteProgress {
@@ -34,6 +37,8 @@ impl DeleteProgress {
             is_complete: AtomicBool::new(false),
             is_cancelled: AtomicBool::new(false),
             start_time: Instant::now(),
+            error_count: AtomicUsize::new(0),
+            last_error: parking_lot::Mutex::new(None),
         }
     }
 
@@ -66,6 +71,23 @@ impl DeleteProgress {
 
     pub fn is_cancelled(&self) -> bool {
         self.is_cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn set_error(&self, count: usize, message: Option<String>) {
+        self.error_count.store(count, Ordering::Release);
+        *self.last_error.lock() = message;
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.error_count.load(Ordering::Acquire) > 0
+    }
+
+    pub fn get_error_count(&self) -> usize {
+        self.error_count.load(Ordering::Acquire)
+    }
+
+    pub fn get_last_error(&self) -> Option<String> {
+        self.last_error.lock().clone()
     }
 }
 
@@ -106,8 +128,10 @@ impl Render for DeleteProgressWindow {
         let total_dirs = self.progress.total_dirs;
         let current_item = self.progress.current_item.lock().clone();
         let is_complete = self.progress.is_complete.load(Ordering::Acquire);
+        let error_count = self.progress.get_error_count();
+        let has_errors = error_count > 0;
 
-        if self.should_auto_close() {
+        if self.should_auto_close() && !has_errors {
             cx.spawn(async move |_, cx| {
                 cx.update(|cx| {
                     cx.quit();
@@ -122,15 +146,31 @@ impl Render for DeleteProgressWindow {
             current_item
         };
 
-        let status_text = if is_complete {
-            "Deletion complete".to_string()
+        let (status_text, status_color) = if is_complete && has_errors {
+            (
+                format!("Completed with {} error(s)", error_count),
+                rgb(0xcc0000),
+            )
+        } else if is_complete {
+            ("Deletion complete".to_string(), rgb(0x666666))
         } else {
-            format!("Deleting {} of {} folders...", deleted_dirs, total_dirs)
+            (
+                format!("Deleting {} of {} folders...", deleted_dirs, total_dirs),
+                rgb(0x666666),
+            )
+        };
+
+        let (icon, icon_color, title) = if is_complete && has_errors {
+            ("!", rgb(0xcc0000), "Deletion Completed with Errors")
+        } else if is_complete {
+            ("", rgb(0x00aa00), "Deletion Complete")
+        } else {
+            ("", rgb(0x666666), "Deleting...")
         };
 
         let progress_clone = self.progress.clone();
 
-        div()
+        let mut container = div()
             .flex()
             .flex_col()
             .size_full()
@@ -149,8 +189,8 @@ impl Render for DeleteProgressWindow {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_color(rgb(0x666666))
-                            .child("🗑"),
+                            .text_color(icon_color)
+                            .child(icon),
                     )
                     .child(
                         div()
@@ -160,7 +200,7 @@ impl Render for DeleteProgressWindow {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Deleting..."),
+                                    .child(title),
                             )
                             .child(
                                 div()
@@ -176,7 +216,7 @@ impl Render for DeleteProgressWindow {
                     .flex()
                     .flex_row()
                     .justify_between()
-                    .child(div().text_xs().text_color(rgb(0x666666)).child(status_text))
+                    .child(div().text_xs().text_color(status_color).child(status_text))
                     .child(
                         div()
                             .text_xs()
@@ -191,29 +231,71 @@ impl Render for DeleteProgressWindow {
                     .text_color(rgb(0x888888))
                     .overflow_hidden()
                     .child(current_display),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .mt_2()
-                    .child(if is_complete {
-                        Button::new("close")
-                            .primary()
-                            .label("Close")
-                            .on_click(|_, _, cx| {
-                                cx.quit();
-                            })
-                    } else {
-                        Button::new("cancel")
-                            .label("Cancel")
-                            .on_click(move |_, _, cx| {
-                                progress_clone.cancel();
-                                cx.quit();
-                            })
-                    }),
-            )
+            );
+
+        if is_complete && has_errors {
+            if let Some(error_msg) = self.progress.get_last_error() {
+                let error_msg_for_copy = error_msg.clone();
+                container = container.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_2()
+                        .rounded(px(4.0))
+                        .bg(rgb(0xffe0e0))
+                        .child(
+                            div()
+                                .w_full()
+                                .text_xs()
+                                .text_color(rgb(0x990000))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(error_msg.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .justify_end()
+                                .child(
+                                    Button::new("copy-error")
+                                        .small()
+                                        .primary()
+                                        .label("Copy Error")
+                                        .on_click(move |_, _, cx: &mut App| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                error_msg_for_copy.clone(),
+                                            ));
+                                        }),
+                                ),
+                        ),
+                );
+            }
+        }
+
+        container.child(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .mt_2()
+                .child(if is_complete {
+                    Button::new("close")
+                        .primary()
+                        .label("Close")
+                        .on_click(|_, _, cx| {
+                            cx.quit();
+                        })
+                } else {
+                    Button::new("cancel")
+                        .label("Cancel")
+                        .on_click(move |_, _, cx| {
+                            progress_clone.cancel();
+                            cx.quit();
+                        })
+                }),
+        )
     }
 }
 
@@ -229,7 +311,7 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
 
         let progress_clone = progress.clone();
         let path_clone = path.clone();
-        let window_bounds = Bounds::centered(None, size(px(400.0), px(200.0)), cx);
+        let window_bounds = Bounds::centered(None, size(px(420.0), px(240.0)), cx);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
@@ -238,8 +320,10 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-                kind: WindowKind::PopUp,
+                kind: WindowKind::Normal,
                 is_movable: true,
+                is_resizable: true,
+                window_min_size: Some(size(px(350.0), px(180.0))),
                 ..Default::default()
             };
 
@@ -262,13 +346,18 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
                     cx.refresh_windows();
                 });
 
-                let is_done = progress.is_complete.load(Ordering::Acquire)
-                    && progress.start_time.elapsed() >= MIN_DISPLAY_DURATION;
+                let is_complete = progress.is_complete.load(Ordering::Acquire);
+                let has_errors = progress.has_errors();
+                let enough_time = progress.start_time.elapsed() >= MIN_DISPLAY_DURATION;
 
-                if is_done {
+                if is_complete && enough_time && !has_errors {
                     cx.update(|cx| {
                         cx.quit();
                     });
+                    break;
+                }
+
+                if is_complete && has_errors {
                     break;
                 }
             }

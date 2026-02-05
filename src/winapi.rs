@@ -21,9 +21,9 @@ use windows::Win32::Foundation::{ERROR_MORE_DATA, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileDispositionInfoEx, FindClose, FindFirstFileExW, FindNextFileW,
     GetFileAttributesW, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS, FIND_FIRST_EX_FLAGS,
-    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS,
+    FIND_FIRST_EX_FLAGS, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 #[cfg(windows)]
 use windows::Win32::System::RestartManager::{
@@ -35,8 +35,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, TerminateProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
 };
 
-const MAX_RETRIES: u32 = 4;
-const RETRY_DELAYS_MS: [u64; 4] = [0, 1, 5, 10];
+const MAX_RETRIES: u32 = 5;
+const RETRY_DELAYS_MS: [u64; 5] = [0, 50, 100, 200, 500];
 
 #[cfg(windows)]
 pub fn path_exists(path: &Path) -> bool {
@@ -280,6 +280,7 @@ pub fn remove_dir(path: &Path) -> io::Result<()> {
 pub struct FileEntry {
     pub path: std::path::PathBuf,
     pub is_dir: bool,
+    pub is_symlink: bool,
     pub size: u64,
 }
 
@@ -302,7 +303,13 @@ where
             FIND_FIRST_EX_FLAGS(0),
         ) {
             Ok(h) => h,
-            Err(_) => return Err(io::Error::last_os_error()),
+            Err(_) => {
+                let err = io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(2) | Some(3) => return Ok(()), // FILE_NOT_FOUND / PATH_NOT_FOUND (broken symlink)
+                    _ => return Err(err),
+                }
+            }
         };
 
         loop {
@@ -315,6 +322,7 @@ where
 
             if filename != "." && filename != ".." {
                 let is_dir = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
+                let is_symlink = (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0;
                 let size = if is_dir {
                     0
                 } else {
@@ -324,6 +332,7 @@ where
                 callback(FileEntry {
                     path: full_path,
                     is_dir,
+                    is_symlink,
                     size,
                 })?;
             }
@@ -347,10 +356,20 @@ where
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let metadata = entry.metadata()?;
-        let is_dir = metadata.is_dir();
-        let size = if is_dir { 0 } else { metadata.len() };
-        callback(FileEntry { path, is_dir, size })?;
+        let file_type = entry.file_type()?;
+        let is_dir = file_type.is_dir();
+        let is_symlink = file_type.is_symlink();
+        let size = if is_dir || is_symlink {
+            0
+        } else {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        callback(FileEntry {
+            path,
+            is_dir,
+            is_symlink,
+            size,
+        })?;
     }
     Ok(())
 }
@@ -663,11 +682,33 @@ pub fn kill_locking_processes(_path: &Path, _verbose: bool) -> io::Result<Vec<Lo
 }
 
 /// Check if an error is a sharing/lock violation (file in use)
+/// ERROR_ACCESS_DENIED (5) is included because Windows often returns this
+/// when a file is locked by another process, not just for permission issues.
 pub fn is_file_in_use_error(error: &io::Error) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
     matches!(
         error.raw_os_error(),
-        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+        Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
     )
+}
+
+/// Check if an error indicates the file/directory no longer exists
+pub fn is_not_found_error(error: &io::Error) -> bool {
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_PATH_NOT_FOUND: i32 = 3;
+    const ERROR_INVALID_NAME: i32 = 123;
+    const ERROR_BAD_PATHNAME: i32 = 161;
+
+    if let Some(code) = error.raw_os_error() {
+        if matches!(
+            code,
+            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_INVALID_NAME | ERROR_BAD_PATHNAME
+        ) {
+            return true;
+        }
+    }
+
+    error.kind() == io::ErrorKind::NotFound
 }

@@ -105,8 +105,18 @@ fn scan_parallel(
     let mut files = Vec::new();
     let mut local_bytes = 0u64;
 
+    let mut symlink_dirs = Vec::new();
+
     if let Err(e) = crate::winapi::enumerate_files(dir, |entry| {
-        if entry.is_dir {
+        if entry.is_symlink {
+            if entry.is_dir {
+                // Symlink directories (junctions): treat as leaf dirs, delete with remove_dir
+                symlink_dirs.push(entry.path);
+            } else {
+                // Symlink files: delete with delete_file
+                files.push(entry.path);
+            }
+        } else if entry.is_dir {
             child_dirs.push(entry.path);
         } else {
             files.push(entry.path);
@@ -116,6 +126,17 @@ fn scan_parallel(
     }) {
         eprintln!("Warning: Cannot read {}: {}", dir.display(), e);
         return;
+    }
+
+    // Register symlink directories as leaf directories (no children, deleted with remove_dir)
+    // IMPORTANT: They must also be counted as children of the parent directory!
+    for symlink_dir in &symlink_dirs {
+        all_dirs.insert(symlink_dir.clone());
+    }
+
+    // Add symlink dirs to child_dirs so they are counted in parent's child_count
+    if !symlink_dirs.is_empty() {
+        child_dirs.extend(symlink_dirs);
     }
 
     let local_file_count = files.len();

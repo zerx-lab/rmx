@@ -1,8 +1,8 @@
 use crate::broker::Broker;
 use crate::error::FailedItem;
 use crate::winapi::{
-    delete_file, is_file_in_use_error, kill_locking_processes, kill_locking_processes_batch,
-    remove_dir,
+    delete_file, is_file_in_use_error, is_not_found_error, kill_locking_processes,
+    kill_locking_processes_batch, remove_dir,
 };
 use crossbeam_channel::Receiver;
 use crossbeam_queue::SegQueue;
@@ -91,12 +91,41 @@ fn worker_thread(
         }
 
         if let Err(e) = remove_dir(&dir) {
+            if is_not_found_error(&e) {
+                broker.mark_complete(dir);
+                continue;
+            }
+
             if config.kill_processes && is_file_in_use_error(&e) {
                 if let Ok(killed) = kill_locking_processes(&dir, config.verbose) {
                     if !killed.is_empty() {
-                        if let Ok(()) = remove_dir(&dir) {
-                            broker.mark_complete(dir);
-                            continue;
+                        match remove_dir(&dir) {
+                            Ok(()) => {
+                                broker.mark_complete(dir);
+                                continue;
+                            }
+                            Err(retry_err) => {
+                                // Check if directory was deleted by another thread
+                                if is_not_found_error(&retry_err) {
+                                    broker.mark_complete(dir);
+                                    continue;
+                                }
+                                // Use the new error for reporting
+                                let msg = format!("{}", retry_err);
+                                error_tracker.record_failure(FailedItem {
+                                    path: dir.clone(),
+                                    error: msg.clone(),
+                                    is_dir: true,
+                                });
+                                if config.verbose {
+                                    eprintln!(
+                                        "Warning: Failed to remove {}: {}",
+                                        dir.display(),
+                                        msg
+                                    );
+                                }
+                                continue;
+                            }
                         }
                     }
                 }
@@ -170,6 +199,9 @@ fn delete_files_sequential(
 
     for path in files {
         if let Err(e) = delete_file(path) {
+            if is_not_found_error(&e) {
+                continue;
+            }
             if config.kill_processes && is_file_in_use_error(&e) {
                 locked_files.push((path.clone(), e));
             } else {
@@ -192,6 +224,9 @@ fn delete_files_parallel(
         .filter_map(|path| match delete_file(path) {
             Ok(()) => None,
             Err(e) => {
+                if is_not_found_error(&e) {
+                    return None;
+                }
                 if config.kill_processes && is_file_in_use_error(&e) {
                     Some((path.clone(), e))
                 } else {
@@ -239,7 +274,9 @@ fn handle_locked_files(
             if paths.len() < parallel_threshold() {
                 for path in &paths {
                     if let Err(e) = delete_file(path) {
-                        record_file_error(path, &e, config, error_tracker);
+                        if !is_not_found_error(&e) {
+                            record_file_error(path, &e, config, error_tracker);
+                        }
                     }
                 }
             } else {
@@ -248,7 +285,9 @@ fn handle_locked_files(
                     .with_min_len(min_chunk_size())
                     .for_each(|path| {
                         if let Err(e) = delete_file(path) {
-                            record_file_error(path, &e, config, error_tracker);
+                            if !is_not_found_error(&e) {
+                                record_file_error(path, &e, config, error_tracker);
+                            }
                         }
                     });
             }

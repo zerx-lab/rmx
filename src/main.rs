@@ -552,6 +552,22 @@ fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, 
     let delete_handle = thread::spawn(move || {
         let result =
             delete_directory_internal(&path_buf, &args_clone, Some(progress_clone.clone()));
+
+        match &result {
+            Ok(_) => {
+                progress_clone.set_error(0, None);
+            }
+            Err(Error::PartialFailure { failed, errors, .. }) => {
+                let first_error = errors
+                    .first()
+                    .map(|e| format!("{}: {}", e.path.display(), e.error));
+                progress_clone.set_error(*failed, first_error);
+            }
+            Err(e) => {
+                progress_clone.set_error(1, Some(e.to_string()));
+            }
+        }
+
         progress_clone.mark_complete();
         result
     });
@@ -560,10 +576,14 @@ fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, 
 
     match delete_handle.join() {
         Ok(result) => result,
-        Err(_) => Err(Error::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "Delete thread panicked".to_string(),
-        }),
+        Err(_) => {
+            progress.set_error(1, Some("Delete thread panicked".to_string()));
+            progress.mark_complete();
+            Err(Error::InvalidPath {
+                path: path.to_path_buf(),
+                reason: "Delete thread panicked".to_string(),
+            })
+        }
     }
 }
 
