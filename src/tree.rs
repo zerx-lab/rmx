@@ -12,6 +12,8 @@ pub struct DirectoryTree {
     pub leaves: Vec<PathBuf>,
     pub file_count: usize,
     pub total_bytes: u64,
+    /// Files in each directory - collected during scan to avoid re-enumeration during deletion
+    pub dir_files: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl DirectoryTree {
@@ -22,6 +24,7 @@ impl DirectoryTree {
             leaves: Vec::new(),
             file_count: 0,
             total_bytes: 0,
+            dir_files: HashMap::new(),
         }
     }
 }
@@ -35,7 +38,7 @@ impl Default for DirectoryTree {
 pub fn discover_tree(root: &Path) -> io::Result<DirectoryTree> {
     let all_dirs: DashSet<PathBuf> = DashSet::new();
     let children_map: DashMap<PathBuf, Vec<PathBuf>> = DashMap::new();
-    let has_children: DashSet<PathBuf> = DashSet::new();
+    let dir_files_map: DashMap<PathBuf, Vec<PathBuf>> = DashMap::new();
     let file_count = AtomicUsize::new(0);
     let total_bytes = AtomicU64::new(0);
 
@@ -43,7 +46,7 @@ pub fn discover_tree(root: &Path) -> io::Result<DirectoryTree> {
         root,
         &all_dirs,
         &children_map,
-        &has_children,
+        &dir_files_map,
         &file_count,
         &total_bytes,
     );
@@ -58,8 +61,13 @@ pub fn discover_tree(root: &Path) -> io::Result<DirectoryTree> {
         .map(|r| (r.key().clone(), r.value().clone()))
         .collect();
 
+    tree.dir_files = dir_files_map
+        .iter()
+        .map(|r| (r.key().clone(), r.value().clone()))
+        .collect();
+
     for dir in &tree.dirs {
-        if !has_children.contains(dir) {
+        if !tree.children.contains_key(dir) {
             tree.leaves.push(dir.clone());
         }
     }
@@ -74,21 +82,21 @@ fn scan_parallel(
     dir: &Path,
     all_dirs: &DashSet<PathBuf>,
     children_map: &DashMap<PathBuf, Vec<PathBuf>>,
-    has_children: &DashSet<PathBuf>,
+    dir_files_map: &DashMap<PathBuf, Vec<PathBuf>>,
     file_count: &AtomicUsize,
     total_bytes: &AtomicU64,
 ) {
     all_dirs.insert(dir.to_path_buf());
 
     let mut child_dirs = Vec::new();
-    let mut local_file_count = 0usize;
+    let mut files = Vec::new();
     let mut local_bytes = 0u64;
 
     if let Err(e) = crate::winapi::enumerate_files(dir, |entry| {
         if entry.is_dir {
             child_dirs.push(entry.path);
         } else {
-            local_file_count += 1;
+            files.push(entry.path);
             local_bytes += entry.size;
         }
         Ok(())
@@ -97,7 +105,9 @@ fn scan_parallel(
         return;
     }
 
-    if local_file_count > 0 {
+    let local_file_count = files.len();
+    if !files.is_empty() {
+        dir_files_map.insert(dir.to_path_buf(), files);
         file_count.fetch_add(local_file_count, Ordering::Relaxed);
     }
 
@@ -106,7 +116,6 @@ fn scan_parallel(
     }
 
     if !child_dirs.is_empty() {
-        has_children.insert(dir.to_path_buf());
         children_map.insert(dir.to_path_buf(), child_dirs.clone());
 
         child_dirs.par_iter().for_each(|child| {
@@ -114,7 +123,7 @@ fn scan_parallel(
                 child,
                 all_dirs,
                 children_map,
-                has_children,
+                dir_files_map,
                 file_count,
                 total_bytes,
             );

@@ -2,15 +2,17 @@ use crate::tree::DirectoryTree;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use dashmap::DashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 pub struct Broker {
     child_counts: DashMap<PathBuf, usize>,
     parent_map: DashMap<PathBuf, PathBuf>,
+    dir_files: DashMap<PathBuf, Vec<PathBuf>>,
     work_tx: Mutex<Option<Sender<PathBuf>>>,
     total_dirs: usize,
     completed: AtomicUsize,
+    done: AtomicBool,
 }
 
 impl Broker {
@@ -19,6 +21,7 @@ impl Broker {
 
         let child_counts = DashMap::new();
         let parent_map = DashMap::new();
+        let dir_files = DashMap::new();
         let total_dirs = tree.dirs.len();
 
         for (parent, children) in &tree.children {
@@ -28,12 +31,18 @@ impl Broker {
             }
         }
 
+        for (dir, files) in tree.dir_files {
+            dir_files.insert(dir, files);
+        }
+
         let broker = Self {
             child_counts,
             parent_map,
+            dir_files,
             work_tx: Mutex::new(Some(tx.clone())),
             total_dirs,
             completed: AtomicUsize::new(0),
+            done: AtomicBool::new(false),
         };
 
         for leaf in tree.leaves {
@@ -43,11 +52,21 @@ impl Broker {
         (broker, tx, rx)
     }
 
+    pub fn take_files(&self, dir: &PathBuf) -> Option<Vec<PathBuf>> {
+        self.dir_files.remove(dir).map(|(_, files)| files)
+    }
+
     pub fn mark_complete(&self, dir: PathBuf) {
-        let completed = self.completed.fetch_add(1, Ordering::SeqCst) + 1;
+        let completed = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
 
         if completed == self.total_dirs {
+            self.done.store(true, Ordering::Release);
             *self.work_tx.lock().unwrap() = None;
+            return;
+        }
+
+        // Fast path: skip if already done
+        if self.done.load(Ordering::Acquire) {
             return;
         }
 
@@ -65,6 +84,7 @@ impl Broker {
 
             if should_send {
                 self.child_counts.remove(&parent_path);
+                // Only acquire lock when we actually need to send
                 if let Some(ref tx) = *self.work_tx.lock().unwrap() {
                     tx.send(parent_path).ok();
                 }

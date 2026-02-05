@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -446,6 +446,145 @@ pub fn find_locking_processes(_path: &Path) -> io::Result<Vec<LockingProcess>> {
     Ok(Vec::new())
 }
 
+#[cfg(windows)]
+pub fn find_locking_processes_batch(paths: &[PathBuf]) -> io::Result<Vec<LockingProcess>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let wide_paths: Vec<Vec<u16>> = paths.iter().map(|p| path_to_wide(p)).collect();
+    let mut session_handle: u32 = 0;
+    let mut session_key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+
+    let result = unsafe { RmStartSession(&mut session_handle, 0, PWSTR(session_key.as_mut_ptr())) };
+    if result != WIN32_ERROR(0) {
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    let file_ptrs: Vec<PCWSTR> = wide_paths.iter().map(|p| PCWSTR(p.as_ptr())).collect();
+    let result = unsafe { RmRegisterResources(session_handle, Some(&file_ptrs), None, None) };
+    if result != WIN32_ERROR(0) {
+        unsafe {
+            let _ = RmEndSession(session_handle);
+        }
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    let mut proc_info_needed: u32 = 0;
+    let mut proc_info_count: u32 = 0;
+    let mut reboot_reasons: u32 = 0;
+
+    let result = unsafe {
+        RmGetList(
+            session_handle,
+            &mut proc_info_needed,
+            &mut proc_info_count,
+            None,
+            &mut reboot_reasons,
+        )
+    };
+
+    if result != WIN32_ERROR(0) && result != ERROR_MORE_DATA {
+        unsafe {
+            let _ = RmEndSession(session_handle);
+        }
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    let mut processes = Vec::new();
+    if proc_info_needed > 0 {
+        let mut proc_info: Vec<RM_PROCESS_INFO> =
+            vec![unsafe { std::mem::zeroed() }; proc_info_needed as usize];
+        proc_info_count = proc_info_needed;
+
+        let result = unsafe {
+            RmGetList(
+                session_handle,
+                &mut proc_info_needed,
+                &mut proc_info_count,
+                Some(proc_info.as_mut_ptr()),
+                &mut reboot_reasons,
+            )
+        };
+
+        if result == WIN32_ERROR(0) {
+            for i in 0..proc_info_count as usize {
+                let info = &proc_info[i];
+                let pid = info.Process.dwProcessId;
+                let name_len = info
+                    .strAppName
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(info.strAppName.len());
+                let name = String::from_utf16_lossy(&info.strAppName[..name_len]);
+                processes.push(LockingProcess { pid, name });
+            }
+        }
+    }
+
+    unsafe {
+        let _ = RmEndSession(session_handle);
+    }
+    Ok(processes)
+}
+
+#[cfg(not(windows))]
+pub fn find_locking_processes_batch(_paths: &[PathBuf]) -> io::Result<Vec<LockingProcess>> {
+    Ok(Vec::new())
+}
+
+#[cfg(windows)]
+pub fn kill_locking_processes_batch(
+    paths: &[PathBuf],
+    verbose: bool,
+) -> io::Result<Vec<LockingProcess>> {
+    let processes = find_locking_processes_batch(paths)?;
+    let mut killed = Vec::new();
+
+    for proc in &processes {
+        if proc.pid == 0 || proc.pid == 4 {
+            if verbose {
+                eprintln!(
+                    "Warning: Skipping system process {} (PID {})",
+                    proc.name, proc.pid
+                );
+            }
+            continue;
+        }
+
+        match kill_process(proc.pid) {
+            Ok(()) => {
+                if verbose {
+                    eprintln!("Killed process '{}' (PID {})", proc.name, proc.pid);
+                }
+                killed.push(proc.clone());
+            }
+            Err(e) => {
+                if verbose {
+                    eprintln!(
+                        "Warning: Failed to kill '{}' (PID {}): {}",
+                        proc.name, proc.pid, e
+                    );
+                }
+            }
+        }
+    }
+
+    if !killed.is_empty() {
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Ok(killed)
+}
+
+#[cfg(not(windows))]
+pub fn kill_locking_processes_batch(
+    _paths: &[PathBuf],
+    _verbose: bool,
+) -> io::Result<Vec<LockingProcess>> {
+    Ok(Vec::new())
+}
+
 /// Kill a process by PID
 #[cfg(windows)]
 pub fn kill_process(pid: u32) -> io::Result<()> {
@@ -504,9 +643,8 @@ pub fn kill_locking_processes(path: &Path, verbose: bool) -> io::Result<Vec<Lock
         }
     }
 
-    // Give processes time to terminate
     if !killed.is_empty() {
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50));
     }
 
     Ok(killed)

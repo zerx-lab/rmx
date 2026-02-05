@@ -1,11 +1,12 @@
 use crate::broker::Broker;
 use crate::error::FailedItem;
 use crate::winapi::{
-    delete_file, enumerate_files, is_file_in_use_error, kill_locking_processes, remove_dir,
-    FileEntry,
+    delete_file, is_file_in_use_error, kill_locking_processes, kill_locking_processes_batch,
+    remove_dir,
 };
 use crossbeam_channel::Receiver;
-use std::path::{Path, PathBuf};
+use rayon::prelude::*;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -80,14 +81,8 @@ fn worker_thread(
     error_tracker: Arc<ErrorTracker>,
 ) {
     while let Ok(dir) = rx.recv() {
-        if let Err(e) = delete_files_in_dir(&dir, &config, &error_tracker) {
-            if config.verbose {
-                eprintln!(
-                    "Warning: Failed to delete files in {}: {}",
-                    dir.display(),
-                    e
-                );
-            }
+        if let Some(files) = broker.take_files(&dir) {
+            delete_files_from_list(&files, &config, &error_tracker);
         }
 
         if let Err(e) = remove_dir(&dir) {
@@ -120,40 +115,63 @@ fn worker_thread(
     }
 }
 
-fn delete_files_in_dir(
-    dir: &Path,
+fn delete_files_from_list(
+    files: &[PathBuf],
     config: &WorkerConfig,
     error_tracker: &Arc<ErrorTracker>,
-) -> std::io::Result<()> {
-    enumerate_files(dir, |entry: FileEntry| {
-        if !entry.is_dir {
-            if let Err(e) = delete_file(&entry.path) {
-                if config.kill_processes && is_file_in_use_error(&e) {
-                    if let Ok(killed) = kill_locking_processes(&entry.path, config.verbose) {
-                        if !killed.is_empty() {
-                            if let Ok(()) = delete_file(&entry.path) {
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
+) {
+    if files.is_empty() {
+        return;
+    }
 
+    let locked_files: Mutex<Vec<(PathBuf, std::io::Error)>> = Mutex::new(Vec::new());
+
+    files.par_iter().for_each(|path| {
+        if let Err(e) = delete_file(path) {
+            if config.kill_processes && is_file_in_use_error(&e) {
+                locked_files.lock().unwrap().push((path.clone(), e));
+            } else {
                 let msg = format!("{}", e);
                 error_tracker.record_failure(FailedItem {
-                    path: entry.path.clone(),
+                    path: path.clone(),
                     error: msg.clone(),
                     is_dir: false,
                 });
-
                 if config.verbose {
-                    eprintln!(
-                        "Warning: Failed to delete {}: {}",
-                        entry.path.display(),
-                        msg
-                    );
+                    eprintln!("Warning: Failed to delete {}: {}", path.display(), msg);
                 }
             }
         }
-        Ok(())
-    })
+    });
+
+    let locked = locked_files.into_inner().unwrap();
+    if !locked.is_empty() {
+        let paths: Vec<PathBuf> = locked.iter().map(|(p, _)| p.clone()).collect();
+        if let Ok(killed) = kill_locking_processes_batch(&paths, config.verbose) {
+            if !killed.is_empty() {
+                paths.par_iter().for_each(|path| {
+                    if let Err(e) = delete_file(path) {
+                        let msg = format!("{}", e);
+                        error_tracker.record_failure(FailedItem {
+                            path: path.clone(),
+                            error: msg.clone(),
+                            is_dir: false,
+                        });
+                        if config.verbose {
+                            eprintln!("Warning: Failed to delete {}: {}", path.display(), msg);
+                        }
+                    }
+                });
+            } else {
+                for (path, e) in locked {
+                    let msg = format!("{}", e);
+                    error_tracker.record_failure(FailedItem {
+                        path,
+                        error: msg,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
 }
