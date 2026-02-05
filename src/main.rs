@@ -8,7 +8,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
+use std::thread;
 use std::time::Instant;
+
+#[cfg(windows)]
+use rmx::progress_ui::{self, DeleteProgress};
 
 const APP_VERSION: &str = env!("APP_VERSION");
 
@@ -74,6 +78,9 @@ struct Args {
         help = "Kill processes that are locking files (use with caution)"
     )]
     kill_processes: bool,
+
+    #[arg(long = "gui", help = "Show GUI progress window (used by context menu)")]
+    gui: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -507,6 +514,64 @@ fn dry_run_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
 }
 
 fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
+    #[cfg(windows)]
+    if args.gui {
+        return delete_directory_with_gui(path, args);
+    }
+
+    delete_directory_internal(path, args, None)
+}
+
+#[cfg(windows)]
+fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
+    let tree = tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
+
+    let total_items = tree.file_count + tree.dirs.len();
+
+    if !progress_ui::should_show_progress_ui(total_items) {
+        return delete_directory_internal(path, args, None);
+    }
+
+    let progress = Arc::new(DeleteProgress::new(tree.file_count, tree.dirs.len()));
+    let progress_clone = progress.clone();
+    let path_buf = path.to_path_buf();
+    let args_clone = Args {
+        command: None,
+        paths: vec![],
+        force: args.force,
+        recursive: args.recursive,
+        threads: args.threads,
+        dry_run: args.dry_run,
+        verbose: args.verbose,
+        stats: args.stats,
+        no_preserve_root: args.no_preserve_root,
+        kill_processes: args.kill_processes,
+        gui: false,
+    };
+
+    let delete_handle = thread::spawn(move || {
+        let result =
+            delete_directory_internal(&path_buf, &args_clone, Some(progress_clone.clone()));
+        progress_clone.mark_complete();
+        result
+    });
+
+    let _ = progress_ui::run_progress_window(progress.clone(), path.to_path_buf());
+
+    match delete_handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(Error::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "Delete thread panicked".to_string(),
+        }),
+    }
+}
+
+fn delete_directory_internal(
+    path: &Path,
+    args: &Args,
+    #[allow(unused_variables)] progress: Option<Arc<DeleteProgress>>,
+) -> Result<DeletionStats, Error> {
     let start = Instant::now();
 
     if args.verbose {
@@ -547,8 +612,8 @@ fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     let progress_handle = if args.verbose && dir_count > 10 {
         let total = broker.total_dirs();
         let broker_clone = broker.clone();
-        Some(std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        Some(thread::spawn(move || loop {
+            thread::sleep(std::time::Duration::from_millis(200));
             let completed = broker_clone.completed_count();
             if completed >= total {
                 break;
@@ -561,6 +626,24 @@ fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         None
     };
 
+    #[cfg(windows)]
+    let gui_progress_handle = progress.as_ref().map(|p| {
+        let progress = p.clone();
+        let broker_clone = broker.clone();
+        let total = broker_clone.total_dirs();
+        thread::spawn(move || loop {
+            thread::sleep(std::time::Duration::from_millis(50));
+            let completed = broker_clone.completed_count();
+            progress
+                .deleted_dirs
+                .store(completed, std::sync::atomic::Ordering::Relaxed);
+
+            if completed >= total || progress.is_cancelled() {
+                break;
+            }
+        })
+    });
+
     for handle in handles {
         handle.join().expect("Worker thread panicked");
     }
@@ -568,6 +651,11 @@ fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     if let Some(handle) = progress_handle {
         handle.join().ok();
         eprintln!("\rdeleting... done");
+    }
+
+    #[cfg(windows)]
+    if let Some(handle) = gui_progress_handle {
+        handle.join().ok();
     }
 
     let elapsed = start.elapsed();
