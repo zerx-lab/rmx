@@ -56,6 +56,37 @@ impl Broker {
         self.dir_files.remove(dir).map(|(_, files)| files)
     }
 
+    pub fn new_dirs_only(tree: DirectoryTree) -> (Self, Sender<PathBuf>, Receiver<PathBuf>) {
+        let (tx, rx) = unbounded();
+
+        let child_counts = DashMap::new();
+        let parent_map = DashMap::new();
+        let total_dirs = tree.dirs.len();
+
+        for (parent, children) in &tree.children {
+            child_counts.insert(parent.clone(), children.len());
+            for child in children {
+                parent_map.insert(child.clone(), parent.clone());
+            }
+        }
+
+        let broker = Self {
+            child_counts,
+            parent_map,
+            dir_files: DashMap::new(),
+            work_tx: Mutex::new(Some(tx.clone())),
+            total_dirs,
+            completed: AtomicUsize::new(0),
+            done: AtomicBool::new(false),
+        };
+
+        for leaf in tree.leaves {
+            tx.send(leaf).ok();
+        }
+
+        (broker, tx, rx)
+    }
+
     pub fn mark_complete(&self, dir: PathBuf) {
         let completed = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
 
