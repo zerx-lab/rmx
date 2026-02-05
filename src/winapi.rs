@@ -6,6 +6,8 @@ use std::time::Duration;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
+use windows::core::PWSTR;
+#[cfg(windows)]
 use windows::Wdk::Storage::FileSystem::{
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
     FILE_DISPOSITION_INFORMATION_EX, FILE_DISPOSITION_INFORMATION_EX_FLAGS,
@@ -14,12 +16,23 @@ use windows::Wdk::Storage::FileSystem::{
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
+use windows::Win32::Foundation::{ERROR_MORE_DATA, WIN32_ERROR};
+#[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileDispositionInfoEx, FindClose, FindFirstFileExW, FindNextFileW,
     GetFileAttributesW, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_DIRECTORY,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS, FIND_FIRST_EX_FLAGS,
     INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, WIN32_FIND_DATAW,
+};
+#[cfg(windows)]
+use windows::Win32::System::RestartManager::{
+    RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
+    RM_PROCESS_INFO,
+};
+#[cfg(windows)]
+use windows::Win32::System::Threading::{
+    OpenProcess, TerminateProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
 };
 
 const MAX_RETRIES: u32 = 3;
@@ -256,10 +269,17 @@ pub fn remove_dir(path: &Path) -> io::Result<()> {
     std::fs::remove_dir(path)
 }
 
+/// File entry information returned during enumeration
+pub struct FileEntry {
+    pub path: std::path::PathBuf,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
 #[cfg(windows)]
 pub fn enumerate_files<F>(dir: &Path, mut callback: F) -> io::Result<()>
 where
-    F: FnMut(&Path, bool) -> io::Result<()>,
+    F: FnMut(FileEntry) -> io::Result<()>,
 {
     let search_path = dir.join("*");
     let wide_path = path_to_wide(&search_path);
@@ -288,8 +308,17 @@ where
 
             if filename != "." && filename != ".." {
                 let is_dir = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
+                let size = if is_dir {
+                    0
+                } else {
+                    ((find_data.nFileSizeHigh as u64) << 32) | (find_data.nFileSizeLow as u64)
+                };
                 let full_path = dir.join(&filename);
-                callback(&full_path, is_dir)?;
+                callback(FileEntry {
+                    path: full_path,
+                    is_dir,
+                    size,
+                })?;
             }
 
             if FindNextFileW(handle, &mut find_data).is_err() {
@@ -306,13 +335,194 @@ where
 #[cfg(not(windows))]
 pub fn enumerate_files<F>(dir: &Path, mut callback: F) -> io::Result<()>
 where
-    F: FnMut(&Path, bool) -> io::Result<()>,
+    F: FnMut(FileEntry) -> io::Result<()>,
 {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let is_dir = entry.file_type()?.is_dir();
-        callback(&path, is_dir)?;
+        let metadata = entry.metadata()?;
+        let is_dir = metadata.is_dir();
+        let size = if is_dir { 0 } else { metadata.len() };
+        callback(FileEntry { path, is_dir, size })?;
     }
     Ok(())
+}
+
+/// Information about a process holding a file lock
+#[derive(Debug, Clone)]
+pub struct LockingProcess {
+    pub pid: u32,
+    pub name: String,
+}
+
+#[cfg(windows)]
+pub fn find_locking_processes(path: &Path) -> io::Result<Vec<LockingProcess>> {
+    let wide_path = path_to_wide(path);
+    let mut session_handle: u32 = 0;
+    let mut session_key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+
+    let result = unsafe { RmStartSession(&mut session_handle, 0, PWSTR(session_key.as_mut_ptr())) };
+
+    if result != WIN32_ERROR(0) {
+        unsafe {
+            let _ = RmEndSession(session_handle);
+        }
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    let file_path_ptr = PCWSTR(wide_path.as_ptr());
+    let result = unsafe { RmRegisterResources(session_handle, Some(&[file_path_ptr]), None, None) };
+
+    if result != WIN32_ERROR(0) {
+        unsafe {
+            let _ = RmEndSession(session_handle);
+        }
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    let mut proc_info_needed: u32 = 0;
+    let mut proc_info_count: u32 = 0;
+    let mut reboot_reasons: u32 = 0;
+
+    let result = unsafe {
+        RmGetList(
+            session_handle,
+            &mut proc_info_needed,
+            &mut proc_info_count,
+            None,
+            &mut reboot_reasons,
+        )
+    };
+
+    if result != WIN32_ERROR(0) && result != ERROR_MORE_DATA {
+        unsafe {
+            let _ = RmEndSession(session_handle);
+        }
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    let mut processes = Vec::new();
+
+    if proc_info_needed > 0 {
+        let mut proc_info: Vec<RM_PROCESS_INFO> =
+            vec![unsafe { std::mem::zeroed() }; proc_info_needed as usize];
+        proc_info_count = proc_info_needed;
+
+        let result = unsafe {
+            RmGetList(
+                session_handle,
+                &mut proc_info_needed,
+                &mut proc_info_count,
+                Some(proc_info.as_mut_ptr()),
+                &mut reboot_reasons,
+            )
+        };
+
+        if result == WIN32_ERROR(0) {
+            for i in 0..proc_info_count as usize {
+                let info = &proc_info[i];
+                let pid = info.Process.dwProcessId;
+
+                let name_len = info
+                    .strAppName
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(info.strAppName.len());
+                let name = String::from_utf16_lossy(&info.strAppName[..name_len]);
+
+                processes.push(LockingProcess { pid, name });
+            }
+        }
+    }
+
+    unsafe {
+        let _ = RmEndSession(session_handle);
+    }
+    Ok(processes)
+}
+
+#[cfg(not(windows))]
+pub fn find_locking_processes(_path: &Path) -> io::Result<Vec<LockingProcess>> {
+    Ok(Vec::new())
+}
+
+/// Kill a process by PID
+#[cfg(windows)]
+pub fn kill_process(pid: u32) -> io::Result<()> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, false, pid)
+            .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+
+        let result = TerminateProcess(handle, 1);
+        CloseHandle(handle).ok();
+
+        result.map_err(|e| io::Error::from_raw_os_error((e.code().0 & 0xFFFF) as i32))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn kill_process(_pid: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Not supported on this platform",
+    ))
+}
+
+/// Kill all processes locking a file
+#[cfg(windows)]
+pub fn kill_locking_processes(path: &Path, verbose: bool) -> io::Result<Vec<LockingProcess>> {
+    let processes = find_locking_processes(path)?;
+    let mut killed = Vec::new();
+
+    for proc in &processes {
+        // Skip system-critical processes (PID 0 and 4 are System processes)
+        if proc.pid == 0 || proc.pid == 4 {
+            if verbose {
+                eprintln!(
+                    "Warning: Skipping system process {} (PID {})",
+                    proc.name, proc.pid
+                );
+            }
+            continue;
+        }
+
+        match kill_process(proc.pid) {
+            Ok(()) => {
+                if verbose {
+                    eprintln!("Killed process '{}' (PID {})", proc.name, proc.pid);
+                }
+                killed.push(proc.clone());
+            }
+            Err(e) => {
+                if verbose {
+                    eprintln!(
+                        "Warning: Failed to kill '{}' (PID {}): {}",
+                        proc.name, proc.pid, e
+                    );
+                }
+            }
+        }
+    }
+
+    // Give processes time to terminate
+    if !killed.is_empty() {
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Ok(killed)
+}
+
+#[cfg(not(windows))]
+pub fn kill_locking_processes(_path: &Path, _verbose: bool) -> io::Result<Vec<LockingProcess>> {
+    Ok(Vec::new())
+}
+
+/// Check if an error is a sharing/lock violation (file in use)
+pub fn is_file_in_use_error(error: &io::Error) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+    )
 }
