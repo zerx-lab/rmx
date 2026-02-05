@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["rmx contributors"]
 description = "Fast parallel directory deletion for Windows - blazingly fast removal of node_modules, target, and other large directories"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 keywords = ["filesystem", "delete", "parallel", "performance", "windows"]
 categories = ["command-line-utilities", "filesystem"]
 
