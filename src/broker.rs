@@ -1,9 +1,9 @@
 use crate::tree::DirectoryTree;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 pub struct Broker {
     child_counts: DashMap<PathBuf, usize>,
@@ -92,7 +92,7 @@ impl Broker {
 
         if completed == self.total_dirs {
             self.done.store(true, Ordering::Release);
-            *self.work_tx.lock().unwrap() = None;
+            *self.work_tx.lock() = None;
             return;
         }
 
@@ -116,7 +116,7 @@ impl Broker {
             if should_send {
                 self.child_counts.remove(&parent_path);
                 // Only acquire lock when we actually need to send
-                if let Some(ref tx) = *self.work_tx.lock().unwrap() {
+                if let Some(ref tx) = *self.work_tx.lock() {
                     tx.send(parent_path).ok();
                 }
             }

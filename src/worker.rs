@@ -5,9 +5,10 @@ use crate::winapi::{
     remove_dir,
 };
 use crossbeam_channel::Receiver;
+use crossbeam_queue::SegQueue;
 use rayon::prelude::*;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 #[derive(Clone)]
@@ -28,22 +29,26 @@ impl Default for WorkerConfig {
 }
 
 pub struct ErrorTracker {
-    failures: Mutex<Vec<FailedItem>>,
+    failures: SegQueue<FailedItem>,
 }
 
 impl ErrorTracker {
     pub fn new() -> Self {
         Self {
-            failures: Mutex::new(Vec::new()),
+            failures: SegQueue::new(),
         }
     }
 
     pub fn record_failure(&self, item: FailedItem) {
-        self.failures.lock().unwrap().push(item);
+        self.failures.push(item);
     }
 
     pub fn get_failures(&self) -> Vec<FailedItem> {
-        self.failures.lock().unwrap().clone()
+        let mut result = Vec::new();
+        while let Some(item) = self.failures.pop() {
+            result.push(item);
+        }
+        result
     }
 }
 
@@ -115,8 +120,30 @@ fn worker_thread(
     }
 }
 
-const PARALLEL_THRESHOLD: usize = 32;
-const MIN_CHUNK_SIZE: usize = 16;
+fn parallel_threshold() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    // 核心数越多，阈值可以越低（更早并行化）
+    // 4核: 24, 8核: 16, 16核: 12, 32核+: 8
+    match cpus {
+        1..=4 => 24,
+        5..=8 => 16,
+        9..=16 => 12,
+        _ => 8,
+    }
+}
+
+fn min_chunk_size() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    // 确保每个线程有足够工作量，避免调度开销
+    // chunk_size = max(4, 文件数 / (核心数 * 2))
+    (cpus * 2).max(4).min(16)
+}
 
 fn delete_files_from_list(
     files: &[PathBuf],
@@ -127,7 +154,7 @@ fn delete_files_from_list(
         return;
     }
 
-    if files.len() < PARALLEL_THRESHOLD {
+    if files.len() < parallel_threshold() {
         delete_files_sequential(files, config, error_tracker);
     } else {
         delete_files_parallel(files, config, error_tracker);
@@ -161,7 +188,7 @@ fn delete_files_parallel(
 ) {
     let locked_files: Vec<(PathBuf, std::io::Error)> = files
         .par_iter()
-        .with_min_len(MIN_CHUNK_SIZE)
+        .with_min_len(min_chunk_size())
         .filter_map(|path| match delete_file(path) {
             Ok(()) => None,
             Err(e) => {
@@ -209,7 +236,7 @@ fn handle_locked_files(
 
     if let Ok(killed) = kill_locking_processes_batch(&paths, config.verbose) {
         if !killed.is_empty() {
-            if paths.len() < PARALLEL_THRESHOLD {
+            if paths.len() < parallel_threshold() {
                 for path in &paths {
                     if let Err(e) = delete_file(path) {
                         record_file_error(path, &e, config, error_tracker);
@@ -218,7 +245,7 @@ fn handle_locked_files(
             } else {
                 paths
                     .par_iter()
-                    .with_min_len(MIN_CHUNK_SIZE)
+                    .with_min_len(min_chunk_size())
                     .for_each(|path| {
                         if let Err(e) = delete_file(path) {
                             record_file_error(path, &e, config, error_tracker);

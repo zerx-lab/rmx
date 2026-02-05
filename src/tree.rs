@@ -5,6 +5,19 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+fn scan_parallel_threshold() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    // 核心数多时更早启用并行: 4核=3, 8核=2, 16核+=2
+    if cpus >= 8 {
+        2
+    } else {
+        3
+    }
+}
+
 #[derive(Debug)]
 pub struct DirectoryTree {
     pub dirs: Vec<PathBuf>,
@@ -118,8 +131,7 @@ fn scan_parallel(
     if !child_dirs.is_empty() {
         children_map.insert(dir.to_path_buf(), child_dirs.clone());
 
-        const SCAN_PARALLEL_THRESHOLD: usize = 4;
-        if child_dirs.len() >= SCAN_PARALLEL_THRESHOLD {
+        if child_dirs.len() >= scan_parallel_threshold() {
             child_dirs.par_iter().for_each(|child| {
                 scan_parallel(
                     child,

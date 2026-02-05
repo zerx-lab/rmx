@@ -11,7 +11,9 @@ categories = ["command-line-utilities", "filesystem"]
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 dashmap = "6"
+parking_lot = "0.12"
 rayon = "1.10"
 
 [target.'cfg(windows)'.dependencies]
