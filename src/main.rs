@@ -6,9 +6,11 @@ use std::process;
 use std::sync::Arc;
 use std::time::Instant;
 
+const APP_VERSION: &str = env!("APP_VERSION");
+
 #[derive(Parser, Debug)]
 #[command(name = "rmx")]
-#[command(version)]
+#[command(version = APP_VERSION)]
 #[command(about = "Fast parallel file/directory deletion for Windows (rm-compatible)")]
 #[command(after_help = "EXAMPLES:\n  \
   rmx file.txt                    Delete file (with confirmation)\n  \

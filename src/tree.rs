@@ -118,16 +118,30 @@ fn scan_parallel(
     if !child_dirs.is_empty() {
         children_map.insert(dir.to_path_buf(), child_dirs.clone());
 
-        child_dirs.par_iter().for_each(|child| {
-            scan_parallel(
-                child,
-                all_dirs,
-                children_map,
-                dir_files_map,
-                file_count,
-                total_bytes,
-            );
-        });
+        const SCAN_PARALLEL_THRESHOLD: usize = 4;
+        if child_dirs.len() >= SCAN_PARALLEL_THRESHOLD {
+            child_dirs.par_iter().for_each(|child| {
+                scan_parallel(
+                    child,
+                    all_dirs,
+                    children_map,
+                    dir_files_map,
+                    file_count,
+                    total_bytes,
+                );
+            });
+        } else {
+            for child in &child_dirs {
+                scan_parallel(
+                    child,
+                    all_dirs,
+                    children_map,
+                    dir_files_map,
+                    file_count,
+                    total_bytes,
+                );
+            }
+        }
     }
 }
 

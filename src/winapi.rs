@@ -35,9 +35,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, TerminateProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
 };
 
-const MAX_RETRIES: u32 = 3;
-const INITIAL_RETRY_DELAY_MS: u64 = 1;
-const MAX_RETRY_DELAY_MS: u64 = 10;
+const MAX_RETRIES: u32 = 4;
+const RETRY_DELAYS_MS: [u64; 4] = [0, 1, 5, 10];
 
 #[cfg(windows)]
 pub fn path_exists(path: &Path) -> bool {
@@ -153,9 +152,12 @@ fn is_retryable_error(code: i32) -> bool {
 pub fn delete_file(path: &Path) -> io::Result<()> {
     let wide_path = path_to_wide(path);
     let mut last_error = None;
-    let mut delay_ms = INITIAL_RETRY_DELAY_MS;
 
-    for _ in 0..MAX_RETRIES {
+    for (i, &delay_ms) in RETRY_DELAYS_MS
+        .iter()
+        .enumerate()
+        .take(MAX_RETRIES as usize)
+    {
         match unsafe { posix_delete_file(&wide_path) } {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -163,8 +165,9 @@ pub fn delete_file(path: &Path) -> io::Result<()> {
                     return Err(e);
                 }
                 last_error = Some(e);
-                thread::sleep(Duration::from_millis(delay_ms));
-                delay_ms = (delay_ms * 2).min(MAX_RETRY_DELAY_MS);
+                if i < MAX_RETRIES as usize - 1 && delay_ms > 0 {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                }
             }
         }
     }
@@ -176,9 +179,12 @@ pub fn delete_file(path: &Path) -> io::Result<()> {
 pub fn remove_dir(path: &Path) -> io::Result<()> {
     let wide_path = path_to_wide(path);
     let mut last_error = None;
-    let mut delay_ms = INITIAL_RETRY_DELAY_MS;
 
-    for _ in 0..MAX_RETRIES {
+    for (i, &delay_ms) in RETRY_DELAYS_MS
+        .iter()
+        .enumerate()
+        .take(MAX_RETRIES as usize)
+    {
         match unsafe { posix_delete_dir(&wide_path) } {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -186,8 +192,9 @@ pub fn remove_dir(path: &Path) -> io::Result<()> {
                     return Err(e);
                 }
                 last_error = Some(e);
-                thread::sleep(Duration::from_millis(delay_ms));
-                delay_ms = (delay_ms * 2).min(MAX_RETRY_DELAY_MS);
+                if i < MAX_RETRIES as usize - 1 && delay_ms > 0 {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                }
             }
         }
     }
