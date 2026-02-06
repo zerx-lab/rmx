@@ -1,8 +1,8 @@
 use crate::broker::Broker;
 use crate::error::FailedItem;
 use crate::winapi::{
-    delete_file, is_file_in_use_error, is_not_found_error, kill_locking_processes,
-    kill_locking_processes_batch, remove_dir,
+    delete_file, force_close_file_handles, is_file_in_use_error, is_not_found_error,
+    kill_locking_processes, kill_locking_processes_batch, remove_dir,
 };
 use crossbeam_channel::Receiver;
 use crossbeam_queue::SegQueue;
@@ -97,37 +97,23 @@ fn worker_thread(
             }
 
             if config.kill_processes && is_file_in_use_error(&e) {
-                if let Ok(killed) = kill_locking_processes(&dir, config.verbose) {
-                    if !killed.is_empty() {
-                        match remove_dir(&dir) {
-                            Ok(()) => {
-                                broker.mark_complete(dir);
-                                continue;
-                            }
-                            Err(retry_err) => {
-                                // Check if directory was deleted by another thread
-                                if is_not_found_error(&retry_err) {
-                                    broker.mark_complete(dir);
-                                    continue;
-                                }
-                                // Use the new error for reporting
-                                let msg = format!("{}", retry_err);
-                                error_tracker.record_failure(FailedItem {
-                                    path: dir.clone(),
-                                    error: msg.clone(),
-                                    is_dir: true,
-                                });
-                                if config.verbose {
-                                    eprintln!(
-                                        "Warning: Failed to remove {}: {}",
-                                        dir.display(),
-                                        msg
-                                    );
-                                }
-                                continue;
-                            }
-                        }
+                let _ = force_close_file_handles(std::slice::from_ref(&dir), config.verbose);
+                if let Ok(()) = remove_dir(&dir) {
+                    broker.mark_complete(dir);
+                    continue;
+                }
+
+                let _ = kill_locking_processes(&dir, config.verbose);
+                match remove_dir(&dir) {
+                    Ok(()) => {
+                        broker.mark_complete(dir);
+                        continue;
                     }
+                    Err(retry_err) if is_not_found_error(&retry_err) => {
+                        broker.mark_complete(dir);
+                        continue;
+                    }
+                    _ => {}
                 }
             }
 
@@ -142,6 +128,7 @@ fn worker_thread(
                 eprintln!("Warning: Failed to remove {}: {}", dir.display(), msg);
             }
 
+            broker.mark_complete(dir);
             continue;
         }
 
@@ -171,7 +158,7 @@ fn min_chunk_size() -> usize {
 
     // 确保每个线程有足够工作量，避免调度开销
     // chunk_size = max(4, 文件数 / (核心数 * 2))
-    (cpus * 2).max(4).min(16)
+    (cpus * 2).clamp(4, 16)
 }
 
 fn delete_files_from_list(
@@ -199,9 +186,6 @@ fn delete_files_sequential(
 
     for path in files {
         if let Err(e) = delete_file(path) {
-            if is_not_found_error(&e) {
-                continue;
-            }
             if config.kill_processes && is_file_in_use_error(&e) {
                 locked_files.push((path.clone(), e));
             } else {
@@ -224,9 +208,6 @@ fn delete_files_parallel(
         .filter_map(|path| match delete_file(path) {
             Ok(()) => None,
             Err(e) => {
-                if is_not_found_error(&e) {
-                    return None;
-                }
                 if config.kill_processes && is_file_in_use_error(&e) {
                     Some((path.clone(), e))
                 } else {
@@ -242,14 +223,14 @@ fn delete_files_parallel(
 
 #[inline]
 fn record_file_error(
-    path: &PathBuf,
+    path: &std::path::Path,
     error: &std::io::Error,
     config: &WorkerConfig,
     error_tracker: &Arc<ErrorTracker>,
 ) {
     let msg = error.to_string();
     error_tracker.record_failure(FailedItem {
-        path: path.clone(),
+        path: path.to_path_buf(),
         error: msg.clone(),
         is_dir: false,
     });
@@ -269,36 +250,32 @@ fn handle_locked_files(
 
     let paths: Vec<PathBuf> = locked_files.iter().map(|(p, _)| p.clone()).collect();
 
-    if let Ok(killed) = kill_locking_processes_batch(&paths, config.verbose) {
-        if !killed.is_empty() {
-            if paths.len() < parallel_threshold() {
-                for path in &paths {
-                    if let Err(e) = delete_file(path) {
-                        if !is_not_found_error(&e) {
-                            record_file_error(path, &e, config, error_tracker);
-                        }
-                    }
-                }
-            } else {
-                paths
-                    .par_iter()
-                    .with_min_len(min_chunk_size())
-                    .for_each(|path| {
-                        if let Err(e) = delete_file(path) {
-                            if !is_not_found_error(&e) {
-                                record_file_error(path, &e, config, error_tracker);
-                            }
-                        }
-                    });
+    let _ = force_close_file_handles(&paths, config.verbose);
+
+    let mut still_locked = Vec::new();
+    for path in &paths {
+        if let Err(e) = delete_file(path) {
+            if is_not_found_error(&e) {
+                continue;
             }
-        } else {
-            for (path, e) in locked_files {
-                let msg = e.to_string();
-                error_tracker.record_failure(FailedItem {
-                    path,
-                    error: msg,
-                    is_dir: false,
-                });
+            if is_file_in_use_error(&e) {
+                still_locked.push(path.clone());
+            } else {
+                record_file_error(path, &e, config, error_tracker);
+            }
+        }
+    }
+
+    if still_locked.is_empty() {
+        return;
+    }
+
+    let _ = kill_locking_processes_batch(&still_locked, config.verbose);
+
+    for path in &still_locked {
+        if let Err(e) = delete_file(path) {
+            if !is_not_found_error(&e) {
+                record_file_error(path, &e, config, error_tracker);
             }
         }
     }

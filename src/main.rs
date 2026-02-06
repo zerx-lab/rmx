@@ -101,7 +101,6 @@ enum Command {
 /// 3. Launched from GUI (e.g., Explorer right-click): no console, no popup window
 #[cfg(windows)]
 unsafe fn setup_console() {
-    use std::ffi::CStr;
     use std::os::raw::{c_char, c_int, c_void};
     use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows::Win32::Storage::FileSystem::{
@@ -180,10 +179,10 @@ unsafe fn setup_console() {
     }
 
     // Also setup C stdio (for any C library code that might use printf, etc.)
-    let conout_c = CStr::from_bytes_with_nul_unchecked(b"CONOUT$\0").as_ptr();
-    let conin_c = CStr::from_bytes_with_nul_unchecked(b"CONIN$\0").as_ptr();
-    let w = CStr::from_bytes_with_nul_unchecked(b"w\0").as_ptr();
-    let r = CStr::from_bytes_with_nul_unchecked(b"r\0").as_ptr();
+    let conout_c = c"CONOUT$".as_ptr();
+    let conin_c = c"CONIN$".as_ptr();
+    let w = c"w".as_ptr();
+    let r = c"r".as_ptr();
     freopen(conin_c, r, __acrt_iob_func(STDIN_FILENO));
     freopen(conout_c, w, __acrt_iob_func(STDOUT_FILENO));
     freopen(conout_c, w, __acrt_iob_func(STDERR_FILENO));
@@ -377,15 +376,27 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         });
     }
 
-    if !args.force {
-        if !confirm_deletion(path, false)? {
-            return Ok(DeletionStats::default());
-        }
+    if !args.force && !confirm_deletion(path, false)? {
+        return Ok(DeletionStats::default());
     }
 
     let start = Instant::now();
 
-    rmx::winapi::delete_file(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
+    match rmx::winapi::delete_file(path) {
+        Ok(()) => {}
+        Err(e) if args.kill_processes && rmx::winapi::is_file_in_use_error(&e) => {
+            let paths = [path.to_path_buf()];
+            let _ = rmx::winapi::force_close_file_handles(&paths, args.verbose);
+            if rmx::winapi::delete_file(path).is_err() {
+                let _ = rmx::winapi::kill_locking_processes(path, args.verbose);
+                rmx::winapi::delete_file(path)
+                    .map_err(|e2| Error::io_with_path(path.to_path_buf(), e2))?;
+            }
+        }
+        Err(e) => {
+            return Err(Error::io_with_path(path.to_path_buf(), e));
+        }
+    }
 
     let elapsed = start.elapsed();
 
@@ -658,7 +669,14 @@ fn delete_directory_internal(
                 .deleted_dirs
                 .store(completed, std::sync::atomic::Ordering::Relaxed);
 
-            if completed >= total || progress.is_cancelled() {
+            if completed >= total
+                || progress.is_cancelled()
+                || progress.is_complete.load(std::sync::atomic::Ordering::Acquire)
+            {
+                let final_completed = broker_clone.completed_count();
+                progress
+                    .deleted_dirs
+                    .store(final_completed, std::sync::atomic::Ordering::Relaxed);
                 break;
             }
         })
@@ -673,13 +691,26 @@ fn delete_directory_internal(
         eprintln!("\rdeleting... done");
     }
 
+    let elapsed = start.elapsed();
+    let failures = error_tracker.get_failures();
+
+    #[cfg(windows)]
+    if let Some(ref p) = progress {
+        p.deleted_dirs
+            .store(broker.completed_count(), std::sync::atomic::Ordering::Relaxed);
+        if !failures.is_empty() {
+            let first_error = failures
+                .first()
+                .map(|e| format!("{}: {}", e.path.display(), e.error));
+            p.set_error(failures.len(), first_error);
+        }
+        p.mark_complete();
+    }
+
     #[cfg(windows)]
     if let Some(handle) = gui_progress_handle {
         handle.join().ok();
     }
-
-    let elapsed = start.elapsed();
-    let failures = error_tracker.get_failures();
 
     if args.verbose {
         println!(

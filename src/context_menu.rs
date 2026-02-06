@@ -14,8 +14,8 @@ pub fn install() -> io::Result<()> {
         ));
     }
 
-    let folder_command = format!("\"{}\" -rf --kill-processes --gui \"%V\"", exe_path);
-    let file_command = format!("\"{}\" -f --kill-processes --gui \"%V\"", exe_path);
+    let folder_command = format!("\"{}\" -rf --gui \"%V\"", exe_path);
+    let file_command = format!("\"{}\" -f --gui \"%V\"", exe_path);
 
     CtxEntry::new_with_options(
         ENTRY_NAME,

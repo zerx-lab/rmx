@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -14,16 +15,22 @@ use windows::Wdk::Storage::FileSystem::{
     FILE_DISPOSITION_POSIX_SEMANTICS,
 };
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS};
+#[cfg(windows)]
+use windows::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, HANDLE, NTSTATUS,
+    STATUS_INFO_LENGTH_MISMATCH,
+};
 #[cfg(windows)]
 use windows::Win32::Foundation::{ERROR_MORE_DATA, WIN32_ERROR};
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileDispositionInfoEx, FindClose, FindFirstFileExW, FindNextFileW,
-    GetFileAttributesW, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS,
-    FIND_FIRST_EX_FLAGS, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, WIN32_FIND_DATAW,
+    GetFileAttributesW, GetFinalPathNameByHandleW, SetFileInformationByHandle, DELETE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS, FIND_FIRST_EX_FLAGS,
+    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 #[cfg(windows)]
 use windows::Win32::System::RestartManager::{
@@ -32,11 +39,12 @@ use windows::Win32::System::RestartManager::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
-    OpenProcess, TerminateProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
+    GetCurrentProcess, OpenProcess, TerminateProcess, PROCESS_DUP_HANDLE,
+    PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
 };
 
-const MAX_RETRIES: u32 = 5;
-const RETRY_DELAYS_MS: [u64; 5] = [0, 50, 100, 200, 500];
+const MAX_RETRIES: u32 = 4;
+const RETRY_DELAYS_MS: [u64; 4] = [0, 1, 5, 10];
 
 #[cfg(windows)]
 pub fn path_exists(path: &Path) -> bool {
@@ -172,7 +180,7 @@ pub fn delete_file(path: &Path) -> io::Result<()> {
         }
     }
 
-    Err(last_error.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "max retries exceeded")))
+    Err(last_error.unwrap_or_else(|| io::Error::other("max retries exceeded")))
 }
 
 #[cfg(windows)]
@@ -199,7 +207,7 @@ pub fn remove_dir(path: &Path) -> io::Result<()> {
         }
     }
 
-    Err(last_error.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "max retries exceeded")))
+    Err(last_error.unwrap_or_else(|| io::Error::other("max retries exceeded")))
 }
 
 #[cfg(windows)]
@@ -232,7 +240,7 @@ unsafe fn posix_delete_file(wide_path: &[u16]) -> io::Result<()> {
 
     CloseHandle(handle).ok();
 
-    result.map_err(|e| io::Error::from_raw_os_error((e.code().0 & 0xFFFF) as i32))
+    result.map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
 }
 
 #[cfg(windows)]
@@ -263,7 +271,7 @@ unsafe fn posix_delete_dir(wide_path: &[u16]) -> io::Result<()> {
 
     CloseHandle(handle).ok();
 
-    result.map_err(|e| io::Error::from_raw_os_error((e.code().0 & 0xFFFF) as i32))
+    result.map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
 }
 
 #[cfg(not(windows))]
@@ -445,8 +453,7 @@ pub fn find_locking_processes(path: &Path) -> io::Result<Vec<LockingProcess>> {
         };
 
         if result == WIN32_ERROR(0) {
-            for i in 0..proc_info_count as usize {
-                let info = &proc_info[i];
+            for info in proc_info.iter().take(proc_info_count as usize) {
                 let pid = info.Process.dwProcessId;
 
                 let name_len = info
@@ -534,8 +541,7 @@ pub fn find_locking_processes_batch(paths: &[PathBuf]) -> io::Result<Vec<Locking
         };
 
         if result == WIN32_ERROR(0) {
-            for i in 0..proc_info_count as usize {
-                let info = &proc_info[i];
+            for info in proc_info.iter().take(proc_info_count as usize) {
                 let pid = info.Process.dwProcessId;
                 let name_len = info
                     .strAppName
@@ -621,7 +627,7 @@ pub fn kill_process(pid: u32) -> io::Result<()> {
         let result = TerminateProcess(handle, 1);
         CloseHandle(handle).ok();
 
-        result.map_err(|e| io::Error::from_raw_os_error((e.code().0 & 0xFFFF) as i32))
+        result.map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
     }
 }
 
@@ -681,9 +687,6 @@ pub fn kill_locking_processes(_path: &Path, _verbose: bool) -> io::Result<Vec<Lo
     Ok(Vec::new())
 }
 
-/// Check if an error is a sharing/lock violation (file in use)
-/// ERROR_ACCESS_DENIED (5) is included because Windows often returns this
-/// when a file is locked by another process, not just for permission issues.
 pub fn is_file_in_use_error(error: &io::Error) -> bool {
     const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -694,13 +697,11 @@ pub fn is_file_in_use_error(error: &io::Error) -> bool {
     )
 }
 
-/// Check if an error indicates the file/directory no longer exists
 pub fn is_not_found_error(error: &io::Error) -> bool {
     const ERROR_FILE_NOT_FOUND: i32 = 2;
     const ERROR_PATH_NOT_FOUND: i32 = 3;
     const ERROR_INVALID_NAME: i32 = 123;
     const ERROR_BAD_PATHNAME: i32 = 161;
-
     if let Some(code) = error.raw_os_error() {
         if matches!(
             code,
@@ -709,6 +710,214 @@ pub fn is_not_found_error(error: &io::Error) -> bool {
             return true;
         }
     }
-
     error.kind() == io::ErrorKind::NotFound
+}
+
+// ============================================================================
+// NtQuerySystemInformation(SystemHandleInformation) + DuplicateHandle 强制解锁
+//
+// 枚举系统所有打开的句柄，找到指向目标文件的句柄，
+// 用 DuplicateHandle(DUPLICATE_CLOSE_SOURCE) 在远程进程中强制关闭。
+// 与火绒安全/Unlocker 相同的内核级句柄关闭机制。
+// ============================================================================
+
+/// Undocumented SystemHandleInformation class (0x10)
+#[cfg(windows)]
+const SYSTEM_HANDLE_INFORMATION_CLASS: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(0x10);
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SystemHandleInformation {
+    number_of_handles: u32,
+    handles: [SystemHandleTableEntryInfo; 1],
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SystemHandleTableEntryInfo {
+    unique_process_id: u16,
+    _creator_back_trace_index: u16,
+    _object_type_index: u8,
+    _handle_attributes: u8,
+    handle_value: u16,
+    _object: usize,
+    granted_access: u32,
+}
+
+/// Force-close all file handles pointing to the given paths.
+///
+/// Only releases locks — does NOT delete anything.
+/// Uses NtQuerySystemInformation + DuplicateHandle(DUPLICATE_CLOSE_SOURCE).
+///
+/// # Safety concern
+/// Closing handles in another process may crash that process.
+/// Only call when user explicitly opted in (--kill-processes).
+#[cfg(windows)]
+pub fn force_close_file_handles(paths: &[PathBuf], verbose: bool) -> io::Result<usize> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+
+    let normalized_targets: Vec<String> = paths
+        .iter()
+        .filter_map(|p| {
+            let abs = std::fs::canonicalize(p).ok()?;
+            Some(abs.to_string_lossy().to_lowercase())
+        })
+        .collect();
+
+    if normalized_targets.is_empty() {
+        return Ok(0);
+    }
+
+    let buf = query_system_handles()?;
+    let info = buf.as_ptr() as *const SystemHandleInformation;
+    let num_handles = unsafe { (*info).number_of_handles as usize };
+
+    if verbose {
+        eprintln!(
+            "Scanning {} system handles for locked files...",
+            num_handles
+        );
+    }
+
+    let entries = unsafe { std::slice::from_raw_parts((*info).handles.as_ptr(), num_handles) };
+
+    let current_pid = std::process::id() as u16;
+    let mut handles_closed = 0usize;
+    let mut proc_cache: std::collections::HashMap<u16, Option<HANDLE>> =
+        std::collections::HashMap::new();
+    let current_process = unsafe { GetCurrentProcess() };
+
+    for entry in entries {
+        let pid = entry.unique_process_id;
+        if pid == current_pid || pid == 0 || pid == 4 || entry.granted_access == 0 {
+            continue;
+        }
+
+        let proc_handle = proc_cache
+            .entry(pid)
+            .or_insert_with(|| unsafe { OpenProcess(PROCESS_DUP_HANDLE, false, pid as u32).ok() });
+
+        let proc_handle = match proc_handle {
+            Some(h) => *h,
+            None => continue,
+        };
+
+        let source_handle = HANDLE(entry.handle_value as *mut c_void);
+        let mut dup_handle = HANDLE::default();
+
+        if unsafe {
+            DuplicateHandle(
+                proc_handle,
+                source_handle,
+                current_process,
+                &mut dup_handle,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
+        }
+        .is_err()
+        {
+            continue;
+        }
+
+        let is_match = resolve_handle_path(dup_handle)
+            .map(|p| normalized_targets.contains(&p.to_lowercase()))
+            .unwrap_or(false);
+
+        unsafe { CloseHandle(dup_handle).ok() };
+
+        if is_match {
+            let ok = unsafe {
+                DuplicateHandle(
+                    proc_handle,
+                    source_handle,
+                    HANDLE::default(),
+                    std::ptr::null_mut(),
+                    0,
+                    false,
+                    DUPLICATE_CLOSE_SOURCE,
+                )
+            }
+            .is_ok();
+
+            if ok {
+                handles_closed += 1;
+                if verbose {
+                    eprintln!(
+                        "  Closed handle 0x{:04X} in PID {}",
+                        entry.handle_value, pid
+                    );
+                }
+            }
+        }
+    }
+
+    for (_, h) in proc_cache {
+        if let Some(h) = h {
+            unsafe { CloseHandle(h).ok() };
+        }
+    }
+
+    if verbose && handles_closed > 0 {
+        eprintln!("Force-closed {} handle(s)", handles_closed);
+    }
+
+    Ok(handles_closed)
+}
+
+#[cfg(windows)]
+fn resolve_handle_path(handle: HANDLE) -> Option<String> {
+    let mut buf = [0u16; 1024];
+    let len = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) };
+    if len == 0 || len as usize >= buf.len() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+#[cfg(windows)]
+fn query_system_handles() -> io::Result<Vec<u8>> {
+    let mut buf_size: usize = 4 * 1024 * 1024;
+    let mut buf: Vec<u8> = vec![0u8; buf_size];
+
+    for _ in 0..10 {
+        let mut return_length: u32 = 0;
+        let status: NTSTATUS = unsafe {
+            NtQuerySystemInformation(
+                SYSTEM_HANDLE_INFORMATION_CLASS,
+                buf.as_mut_ptr() as *mut c_void,
+                buf_size as u32,
+                &mut return_length,
+            )
+        };
+
+        if status == STATUS_INFO_LENGTH_MISMATCH {
+            buf_size = (return_length as usize) * 3 / 2;
+            buf.resize(buf_size, 0);
+            continue;
+        }
+
+        if status.is_ok() {
+            return Ok(buf);
+        }
+
+        return Err(io::Error::other(format!(
+            "NtQuerySystemInformation failed: 0x{:08X}",
+            status.0 as u32
+        )));
+    }
+
+    Err(io::Error::other(
+        "NtQuerySystemInformation: buffer resize limit",
+    ))
+}
+
+#[cfg(not(windows))]
+pub fn force_close_file_handles(_paths: &[PathBuf], _verbose: bool) -> io::Result<usize> {
+    Ok(0)
 }

@@ -1,3 +1,4 @@
+#![allow(clippy::duplicated_attributes)]
 #![cfg(windows)]
 
 use std::path::PathBuf;
@@ -7,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::Sizable;
 use gpui_component::progress::Progress;
 use gpui_component::Root;
 use gpui_component_assets::Assets;
@@ -235,41 +235,19 @@ impl Render for DeleteProgressWindow {
 
         if is_complete && has_errors {
             if let Some(error_msg) = self.progress.get_last_error() {
-                let error_msg_for_copy = error_msg.clone();
+                let display_error = if error_msg.len() > 80 {
+                    format!("{}...", &error_msg[..77])
+                } else {
+                    error_msg
+                };
                 container = container.child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
                         .p_2()
                         .rounded(px(4.0))
                         .bg(rgb(0xffe0e0))
-                        .child(
-                            div()
-                                .w_full()
-                                .text_xs()
-                                .text_color(rgb(0x990000))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(error_msg.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .justify_end()
-                                .child(
-                                    Button::new("copy-error")
-                                        .small()
-                                        .primary()
-                                        .label("Copy Error")
-                                        .on_click(move |_, _, cx: &mut App| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                error_msg_for_copy.clone(),
-                                            ));
-                                        }),
-                                ),
-                        ),
+                        .text_xs()
+                        .text_color(rgb(0x990000))
+                        .child(display_error),
                 );
             }
         }
@@ -311,7 +289,7 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
 
         let progress_clone = progress.clone();
         let path_clone = path.clone();
-        let window_bounds = Bounds::centered(None, size(px(420.0), px(240.0)), cx);
+        let window_bounds = Bounds::centered(None, size(px(400.0), px(200.0)), cx);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
@@ -320,10 +298,8 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-                kind: WindowKind::Normal,
+                kind: WindowKind::PopUp,
                 is_movable: true,
-                is_resizable: true,
-                window_min_size: Some(size(px(350.0), px(180.0))),
                 ..Default::default()
             };
 

@@ -37,6 +37,7 @@ windows = { version = "0.58", features = [
     "Win32_System_RestartManager",
     "Win32_System_Threading",
     "Wdk_Storage_FileSystem",
+    "Wdk_System_SystemInformation",
 ] }
 win-ctx = "1.4"
 

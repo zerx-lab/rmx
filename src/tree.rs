@@ -129,14 +129,8 @@ fn scan_parallel(
     }
 
     // Register symlink directories as leaf directories (no children, deleted with remove_dir)
-    // IMPORTANT: They must also be counted as children of the parent directory!
-    for symlink_dir in &symlink_dirs {
-        all_dirs.insert(symlink_dir.clone());
-    }
-
-    // Add symlink dirs to child_dirs so they are counted in parent's child_count
-    if !symlink_dirs.is_empty() {
-        child_dirs.extend(symlink_dirs);
+    for symlink_dir in symlink_dirs {
+        all_dirs.insert(symlink_dir);
     }
 
     let local_file_count = files.len();
