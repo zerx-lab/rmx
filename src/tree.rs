@@ -5,10 +5,19 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use std::sync::OnceLock;
+
+pub fn cpu_count() -> usize {
+    static CPU_COUNT: OnceLock<usize> = OnceLock::new();
+    *CPU_COUNT.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    })
+}
+
 fn scan_parallel_threshold() -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let cpus = cpu_count();
 
     // 核心数多时更早启用并行: 4核=3, 8核=2, 16核+=2
     if cpus >= 8 {
@@ -66,18 +75,11 @@ pub fn discover_tree(root: &Path) -> io::Result<DirectoryTree> {
 
     let mut tree = DirectoryTree::new();
 
-    tree.dirs = all_dirs.iter().map(|r| r.clone()).collect();
+    tree.dirs = all_dirs.into_iter().collect();
     tree.dirs.sort();
 
-    tree.children = children_map
-        .iter()
-        .map(|r| (r.key().clone(), r.value().clone()))
-        .collect();
-
-    tree.dir_files = dir_files_map
-        .iter()
-        .map(|r| (r.key().clone(), r.value().clone()))
-        .collect();
+    tree.children = children_map.into_iter().collect();
+    tree.dir_files = dir_files_map.into_iter().collect();
 
     for dir in &tree.dirs {
         if !tree.children.contains_key(dir) {

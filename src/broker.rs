@@ -24,11 +24,12 @@ impl Broker {
         let dir_files = DashMap::new();
         let total_dirs = tree.dirs.len();
 
-        for (parent, children) in &tree.children {
-            child_counts.insert(parent.clone(), children.len());
+        for (parent, children) in tree.children {
+            let child_count = children.len();
             for child in children {
-                parent_map.insert(child.clone(), parent.clone());
+                parent_map.insert(child, parent.clone());
             }
+            child_counts.insert(parent, child_count);
         }
 
         for (dir, files) in tree.dir_files {
@@ -63,11 +64,12 @@ impl Broker {
         let parent_map = DashMap::new();
         let total_dirs = tree.dirs.len();
 
-        for (parent, children) in &tree.children {
-            child_counts.insert(parent.clone(), children.len());
+        for (parent, children) in tree.children {
+            let child_count = children.len();
             for child in children {
-                parent_map.insert(child.clone(), parent.clone());
+                parent_map.insert(child, parent.clone());
             }
+            child_counts.insert(parent, child_count);
         }
 
         let broker = Self {

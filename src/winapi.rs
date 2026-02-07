@@ -54,13 +54,12 @@ pub fn path_exists(path: &Path) -> bool {
         if attrs != INVALID_FILE_ATTRIBUTES {
             return true;
         }
-        path_exists_via_find(path)
+        path_exists_via_find_wide(&wide_path)
     }
 }
 
 #[cfg(windows)]
-fn path_exists_via_find(path: &Path) -> bool {
-    let wide_path = path_to_wide(path);
+fn path_exists_via_find_wide(wide_path: &[u16]) -> bool {
     unsafe {
         let mut find_data: WIN32_FIND_DATAW = std::mem::zeroed();
         match FindFirstFileExW(
@@ -88,13 +87,12 @@ pub fn is_directory(path: &Path) -> bool {
         if attrs != INVALID_FILE_ATTRIBUTES {
             return (attrs & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
         }
-        is_directory_via_find(path)
+        is_directory_via_find_wide(&wide_path)
     }
 }
 
 #[cfg(windows)]
-fn is_directory_via_find(path: &Path) -> bool {
-    let wide_path = path_to_wide(path);
+fn is_directory_via_find_wide(wide_path: &[u16]) -> bool {
     unsafe {
         let mut find_data: WIN32_FIND_DATAW = std::mem::zeroed();
         match FindFirstFileExW(

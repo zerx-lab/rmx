@@ -363,6 +363,7 @@ pub fn should_show_progress_ui(total_items: usize) -> bool {
 pub struct ConfirmState {
     pub confirmed: AtomicBool,
     pub cancelled: AtomicBool,
+    pub skip_next_confirm: AtomicBool,
 }
 
 impl Default for ConfirmState {
@@ -376,6 +377,7 @@ impl ConfirmState {
         Self {
             confirmed: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
+            skip_next_confirm: AtomicBool::new(false),
         }
     }
 
@@ -387,12 +389,20 @@ impl ConfirmState {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    pub fn set_skip_next_confirm(&self, skip: bool) {
+        self.skip_next_confirm.store(skip, Ordering::Release);
+    }
+
     pub fn is_confirmed(&self) -> bool {
         self.confirmed.load(Ordering::Acquire)
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn should_skip_next_confirm(&self) -> bool {
+        self.skip_next_confirm.load(Ordering::Acquire)
     }
 }
 
@@ -441,8 +451,10 @@ impl Render for ConfirmDeleteWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.clone();
         let state_cancel = self.state.clone();
+        let state_checkbox = self.state.clone();
         let path_display = self.format_path_display();
         let item_summary = self.format_item_summary();
+        let skip_checked = self.state.should_skip_next_confirm();
 
         let theme = cx.theme();
         let bg = theme.background;
@@ -533,7 +545,7 @@ impl Render for ConfirmDeleteWindow {
                 div()
                     .flex()
                     .flex_row()
-                    .justify_end()
+                    .justify_between()
                     .items_center()
                     .gap_2()
                     .mt_auto()
@@ -542,39 +554,62 @@ impl Render for ConfirmDeleteWindow {
                     .border_t_1()
                     .border_color(border)
                     .child(
-                        Button::new("cancel-btn")
-                            .ghost()
-                            .label("取消")
-                            .on_click(move |_, _, cx| {
-                                state_cancel.cancel();
-                                cx.quit();
+                        gpui_component::checkbox::Checkbox::new("skip-confirm-checkbox")
+                            .checked(skip_checked)
+                            .label("下次不再确认")
+                            .with_size(gpui_component::Size::Small)
+                            .on_click(move |checked, _, _| {
+                                state_checkbox.set_skip_next_confirm(*checked);
                             }),
                     )
                     .child(
-                        Button::new("confirm-btn")
-                            .danger()
-                            .label("删除")
-                            .icon(IconName::Delete)
-                            .on_click(move |_, _, cx| {
-                                state.confirm();
-                                cx.quit();
-                            }),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-btn")
+                                    .ghost()
+                                    .label("取消")
+                                    .on_click(move |_, _, cx| {
+                                        state_cancel.cancel();
+                                        cx.quit();
+                                    }),
+                            )
+                            .child(
+                                Button::new("confirm-btn")
+                                    .danger()
+                                    .label("删除")
+                                    .icon(IconName::Delete)
+                                    .on_click(move |_, _, cx| {
+                                        state.confirm();
+                                        cx.quit();
+                                    }),
+                            ),
                     ),
             )
     }
 }
 
+/// 确认对话框的返回结果
+pub struct ConfirmResult {
+    /// 用户是否确认了删除
+    pub confirmed: bool,
+    /// 用户是否勾选了"下次不再确认"
+    pub skip_next_confirm: bool,
+}
+
 /// 显示删除确认对话框，返回用户选择
 /// 
 /// # Returns
-/// - `Ok(true)` if user confirmed deletion
-/// - `Ok(false)` if user cancelled
+/// - `Ok(ConfirmResult)` with confirmation and skip_confirm state
 /// - `Err` if dialog failed to launch
 pub fn run_confirmation_dialog(
     path: PathBuf,
     total_files: usize,
     total_dirs: usize,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ConfirmResult> {
     let state = Arc::new(ConfirmState::new());
     let state_clone = state.clone();
 
@@ -612,7 +647,10 @@ pub fn run_confirmation_dialog(
         .detach();
     });
 
-    Ok(state.is_confirmed())
+    Ok(ConfirmResult {
+        confirmed: state.is_confirmed(),
+        skip_next_confirm: state.should_skip_next_confirm(),
+    })
 }
 
 pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyhow::Result<()> {

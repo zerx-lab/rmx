@@ -117,16 +117,15 @@ fn worker_thread(
                 }
             }
 
-            let msg = format!("{}", e);
-            error_tracker.record_failure(FailedItem {
-                path: dir.clone(),
-                error: msg.clone(),
-                is_dir: true,
-            });
-
+            let msg = e.to_string();
             if config.verbose {
                 eprintln!("Warning: Failed to remove {}: {}", dir.display(), msg);
             }
+            error_tracker.record_failure(FailedItem {
+                path: dir.clone(),
+                error: msg,
+                is_dir: true,
+            });
 
             broker.mark_complete(dir);
             continue;
@@ -136,13 +135,18 @@ fn worker_thread(
     }
 }
 
-fn parallel_threshold() -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+fn cpu_count() -> usize {
+    static CPU_COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CPU_COUNT.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    })
+}
 
-    // 核心数越多，阈值可以越低（更早并行化）
-    // 4核: 24, 8核: 16, 16核: 12, 32核+: 8
+fn parallel_threshold() -> usize {
+    let cpus = cpu_count();
+
     match cpus {
         1..=4 => 24,
         5..=8 => 16,
@@ -152,12 +156,7 @@ fn parallel_threshold() -> usize {
 }
 
 fn min_chunk_size() -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-
-    // 确保每个线程有足够工作量，避免调度开销
-    // chunk_size = max(4, 文件数 / (核心数 * 2))
+    let cpus = cpu_count();
     (cpus * 2).clamp(4, 16)
 }
 
@@ -229,14 +228,14 @@ fn record_file_error(
     error_tracker: &Arc<ErrorTracker>,
 ) {
     let msg = error.to_string();
-    error_tracker.record_failure(FailedItem {
-        path: path.to_path_buf(),
-        error: msg.clone(),
-        is_dir: false,
-    });
     if config.verbose {
         eprintln!("Warning: Failed to delete {}: {}", path.display(), msg);
     }
+    error_tracker.record_failure(FailedItem {
+        path: path.to_path_buf(),
+        error: msg,
+        is_dir: false,
+    });
 }
 
 fn handle_locked_files(
@@ -248,31 +247,27 @@ fn handle_locked_files(
         return;
     }
 
-    let paths: Vec<PathBuf> = locked_files.iter().map(|(p, _)| p.clone()).collect();
+    let mut paths: Vec<PathBuf> = locked_files.into_iter().map(|(p, _)| p).collect();
 
     let _ = kill_locking_processes_batch(&paths, config.verbose);
 
-    let mut still_locked = Vec::new();
-    for path in &paths {
-        if let Err(e) = delete_file(path) {
-            if is_not_found_error(&e) {
-                continue;
-            }
-            if is_file_in_use_error(&e) {
-                still_locked.push(path.clone());
-            } else {
-                record_file_error(path, &e, config, error_tracker);
-            }
+    paths.retain(|path| match delete_file(path) {
+        Ok(()) => false,
+        Err(e) if is_not_found_error(&e) => false,
+        Err(e) if is_file_in_use_error(&e) => true,
+        Err(e) => {
+            record_file_error(path, &e, config, error_tracker);
+            false
         }
-    }
+    });
 
-    if still_locked.is_empty() {
+    if paths.is_empty() {
         return;
     }
 
-    let _ = force_close_file_handles(&still_locked, config.verbose);
+    let _ = force_close_file_handles(&paths, config.verbose);
 
-    for path in &still_locked {
+    for path in &paths {
         if let Err(e) = delete_file(path) {
             if !is_not_found_error(&e) {
                 record_file_error(path, &e, config, error_tracker);

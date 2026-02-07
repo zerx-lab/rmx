@@ -1,3 +1,7 @@
+#[cfg(windows)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::{Parser, Subcommand};
 use rmx::{broker::Broker, error::Error, safety, tree, worker};
 use std::io::Write;
@@ -9,6 +13,11 @@ use std::time::Instant;
 
 #[cfg(windows)]
 use rmx::progress_ui::{self, DeleteProgress};
+
+#[cfg(windows)]
+const SETTINGS_REG_KEY: &str = "Software\\rmx\\Settings";
+#[cfg(windows)]
+const SKIP_CONFIRM_VALUE: &str = "SkipDeleteConfirm";
 
 const APP_VERSION: &str = env!("APP_VERSION");
 
@@ -83,6 +92,12 @@ struct Args {
         help = "Only unlock files/directories (close handles) without deleting"
     )]
     unlock: bool,
+
+    #[arg(
+        long = "reset-confirm",
+        help = "Reset skip-confirmation setting, restore delete confirmation dialog"
+    )]
+    reset_confirm: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -110,6 +125,19 @@ fn main() {
             eprintln!("rmx: {}", e);
             process::exit(1);
         }
+        return;
+    }
+
+    #[cfg(windows)]
+    if args.reset_confirm {
+        write_skip_confirm(false);
+        println!("rmx: delete confirmation dialog has been restored.");
+        return;
+    }
+
+    #[cfg(not(windows))]
+    if args.reset_confirm {
+        println!("rmx: --reset-confirm is only available on Windows.");
         return;
     }
 
@@ -283,11 +311,20 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     if !args.force {
         #[cfg(windows)]
         if args.gui {
-            let confirmed =
-                progress_ui::run_confirmation_dialog(path.to_path_buf(), 1, 0).unwrap_or(false);
+            if !read_skip_confirm() {
+                let result = progress_ui::run_confirmation_dialog(path.to_path_buf(), 1, 0)
+                    .unwrap_or(progress_ui::ConfirmResult {
+                        confirmed: false,
+                        skip_next_confirm: false,
+                    });
 
-            if !confirmed {
-                return Ok(DeletionStats::default());
+                if result.confirmed && result.skip_next_confirm {
+                    write_skip_confirm(true);
+                }
+
+                if !result.confirmed {
+                    return Ok(DeletionStats::default());
+                }
             }
         } else if !confirm_deletion(path, false)? {
             return Ok(DeletionStats::default());
@@ -410,13 +447,23 @@ fn process_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
 
         #[cfg(windows)]
         if args.gui {
-            let confirmed =
-                progress_ui::run_confirmation_dialog(path.to_path_buf(), file_count, dir_count)
-                    .unwrap_or(false);
+            if !read_skip_confirm() {
+                let result =
+                    progress_ui::run_confirmation_dialog(path.to_path_buf(), file_count, dir_count)
+                        .unwrap_or(progress_ui::ConfirmResult {
+                            confirmed: false,
+                            skip_next_confirm: false,
+                        });
 
-            if !confirmed {
-                return Ok(DeletionStats::default());
+                if result.confirmed && result.skip_next_confirm {
+                    write_skip_confirm(true);
+                }
+
+                if !result.confirmed {
+                    return Ok(DeletionStats::default());
+                }
             }
+            return delete_directory(path, args, Some(tree));
         } else {
             eprint!(
                 "rmx: descend into directory '{}' ({} files, {} directories)? [y/N] ",
@@ -445,9 +492,11 @@ fn process_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
                 return Ok(DeletionStats::default());
             }
         }
+
+        return delete_directory(path, args, Some(tree));
     }
 
-    delete_directory(path, args)
+    delete_directory(path, args, None)
 }
 
 fn dry_run_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
@@ -471,23 +520,36 @@ fn dry_run_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     })
 }
 
-fn delete_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
+fn delete_directory(
+    path: &Path,
+    args: &Args,
+    cached_tree: Option<tree::DirectoryTree>,
+) -> Result<DeletionStats, Error> {
     #[cfg(windows)]
     if args.gui {
-        return delete_directory_with_gui(path, args);
+        return delete_directory_with_gui(path, args, cached_tree);
     }
 
-    delete_directory_internal(path, args, None)
+    delete_directory_internal(path, args, None, cached_tree)
 }
 
 #[cfg(windows)]
-fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
-    let tree = tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
+fn delete_directory_with_gui(
+    path: &Path,
+    args: &Args,
+    cached_tree: Option<tree::DirectoryTree>,
+) -> Result<DeletionStats, Error> {
+    let tree = match cached_tree {
+        Some(t) => t,
+        None => {
+            tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?
+        }
+    };
 
     let total_items = tree.file_count + tree.dirs.len();
 
     if !progress_ui::should_show_progress_ui(total_items) {
-        return delete_directory_internal(path, args, None);
+        return delete_directory_internal(path, args, None, Some(tree));
     }
 
     let progress = Arc::new(DeleteProgress::new(tree.file_count, tree.dirs.len()));
@@ -506,11 +568,16 @@ fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, 
         kill_processes: args.kill_processes,
         gui: false,
         unlock: false,
+        reset_confirm: false,
     };
 
     let delete_handle = thread::spawn(move || {
-        let result =
-            delete_directory_internal(&path_buf, &args_clone, Some(progress_clone.clone()));
+        let result = delete_directory_internal(
+            &path_buf,
+            &args_clone,
+            Some(progress_clone.clone()),
+            Some(tree),
+        );
 
         match &result {
             Ok(_) => {
@@ -551,24 +618,30 @@ fn delete_directory_internal(
     path: &Path,
     args: &Args,
     #[allow(unused_variables)] progress: Option<Arc<DeleteProgress>>,
+    cached_tree: Option<tree::DirectoryTree>,
 ) -> Result<DeletionStats, Error> {
     let start = Instant::now();
 
-    if args.verbose {
-        println!("scanning '{}'...", path.display());
-    }
-
-    let tree = tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
+    let tree = match cached_tree {
+        Some(t) => {
+            if args.verbose {
+                println!("reusing cached tree for '{}'...", path.display());
+            }
+            t
+        }
+        None => {
+            if args.verbose {
+                println!("scanning '{}'...", path.display());
+            }
+            tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?
+        }
+    };
 
     let dir_count = tree.dirs.len();
     let file_count = tree.file_count;
     let total_bytes = tree.total_bytes;
 
-    let worker_count = args.threads.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-    });
+    let worker_count = args.threads.unwrap_or_else(tree::cpu_count);
 
     let (broker, tx, rx) = Broker::new(tree);
     let broker = Arc::new(broker);
@@ -703,6 +776,97 @@ fn delete_directory_internal(
         total_bytes,
         total_time: elapsed,
     })
+}
+
+#[cfg(windows)]
+fn read_skip_confirm() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::*;
+    use windows::Win32::System::Registry::*;
+
+    let key_wide: Vec<u16> = SETTINGS_REG_KEY
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let value_wide: Vec<u16> = SKIP_CONFIRM_VALUE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        let result = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key_wide.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        );
+        if result != ERROR_SUCCESS {
+            return false;
+        }
+
+        let mut data: u32 = 0;
+        let mut data_size = std::mem::size_of::<u32>() as u32;
+        let result = RegQueryValueExW(
+            hkey,
+            PCWSTR(value_wide.as_ptr()),
+            None,
+            None,
+            Some(&mut data as *mut u32 as *mut u8),
+            Some(&mut data_size),
+        );
+        let _ = RegCloseKey(hkey);
+
+        result == ERROR_SUCCESS && data != 0
+    }
+}
+
+#[cfg(windows)]
+fn write_skip_confirm(skip: bool) {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::*;
+    use windows::Win32::System::Registry::*;
+
+    let key_wide: Vec<u16> = SETTINGS_REG_KEY
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let value_wide: Vec<u16> = SKIP_CONFIRM_VALUE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        let result = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key_wide.as_ptr()),
+            0,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut hkey,
+            None,
+        );
+        if result != ERROR_SUCCESS {
+            return;
+        }
+
+        let data: u32 = if skip { 1 } else { 0 };
+        let _ = RegSetValueExW(
+            hkey,
+            PCWSTR(value_wide.as_ptr()),
+            0,
+            REG_DWORD,
+            Some(std::slice::from_raw_parts(
+                &data as *const u32 as *const u8,
+                std::mem::size_of::<u32>(),
+            )),
+        );
+        let _ = RegCloseKey(hkey);
+    }
 }
 
 fn confirm_deletion(path: &Path, is_dir: bool) -> Result<bool, Error> {
