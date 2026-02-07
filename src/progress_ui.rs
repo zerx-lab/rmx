@@ -678,3 +678,576 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
 
     Ok(())
 }
+
+// ── Unlock mode UI (仿火绒风格) ─────────────────────────────────────────
+
+pub struct UnlockFileInfo {
+    pub file_name: String,
+    pub full_path: PathBuf,
+}
+
+struct KillFailure {
+    name: String,
+    pid: u32,
+    error: String,
+}
+
+enum UnlockPhase {
+    Confirm,
+    Working,
+    Success { killed: usize },
+    Failed { killed: usize, failures: Vec<KillFailure> },
+}
+
+pub struct UnlockProgressWindow {
+    files: Vec<UnlockFileInfo>,
+    locking_processes: Vec<crate::winapi::LockingProcess>,
+    phase: UnlockPhase,
+    confirm_signal: Arc<AtomicBool>,
+    result: Arc<parking_lot::Mutex<Option<(usize, Vec<KillFailure>)>>>,
+}
+
+impl UnlockProgressWindow {
+    pub fn new(
+        files: Vec<UnlockFileInfo>,
+        locking_processes: Vec<crate::winapi::LockingProcess>,
+    ) -> Self {
+        Self {
+            files,
+            locking_processes,
+            phase: UnlockPhase::Confirm,
+            confirm_signal: Arc::new(AtomicBool::new(false)),
+            result: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    fn truncate_path(path: &str, max_len: usize) -> String {
+        if path.len() > max_len {
+            format!("...{}", &path[path.len() - (max_len - 3)..])
+        } else {
+            path.to_string()
+        }
+    }
+
+    fn render_process_table(
+        &self,
+        processes: &[crate::winapi::LockingProcess],
+        theme: &gpui_component::theme::Theme,
+    ) -> Div {
+        let fg = theme.foreground;
+        let muted_fg = theme.muted_foreground;
+        let border = theme.border;
+
+        let mut table = div()
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .max_h(px(120.0))
+            .overflow_hidden();
+
+        table = table.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_3()
+                .py_1p5()
+                .bg(theme.secondary.opacity(0.3))
+                .border_b_1()
+                .border_color(border)
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(muted_fg)
+                        .child("名称"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(muted_fg)
+                        .child("路径"),
+                ),
+        );
+
+        for proc in processes {
+            let exe_display = proc
+                .exe_path
+                .as_deref()
+                .map(|p| Self::truncate_path(p, 45))
+                .unwrap_or_else(|| format!("PID: {}", proc.pid));
+
+            table = table.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px_3()
+                    .py_1p5()
+                    .border_b_1()
+                    .border_color(border.opacity(0.3))
+                    .child(
+                        div()
+                            .w(px(120.0))
+                            .text_xs()
+                            .text_color(fg)
+                            .child(proc.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(muted_fg)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(exe_display),
+                    ),
+            );
+        }
+        table
+    }
+}
+
+impl Render for UnlockProgressWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ── 状态转换 ──
+        if self.confirm_signal.load(Ordering::Acquire) && matches!(self.phase, UnlockPhase::Confirm) {
+            self.phase = UnlockPhase::Working;
+
+            let procs = self.locking_processes.clone();
+            let result_slot = self.result.clone();
+
+            cx.spawn(async move |_this, cx| {
+                let result = cx.background_executor().spawn(async move {
+                    let mut killed = 0usize;
+                    let mut failures = Vec::new();
+
+                    for proc in &procs {
+                        if proc.pid == 0 || proc.pid == 4 {
+                            continue;
+                        }
+                        match crate::winapi::kill_process(proc.pid) {
+                            Ok(()) => killed += 1,
+                            Err(e) => failures.push(KillFailure {
+                                name: proc.name.clone(),
+                                pid: proc.pid,
+                                error: e.to_string(),
+                            }),
+                        }
+                    }
+
+                    (killed, failures)
+                }).await;
+
+                *result_slot.lock() = Some(result);
+
+                cx.update(|cx| {
+                    cx.refresh_windows();
+                });
+            }).detach();
+        }
+
+        if matches!(self.phase, UnlockPhase::Working) {
+            if let Some((killed, failures)) = self.result.lock().take() {
+                if failures.is_empty() {
+                    self.phase = UnlockPhase::Success { killed };
+                } else {
+                    self.phase = UnlockPhase::Failed { killed, failures };
+                    window.resize(size(px(520.0), px(380.0)));
+                }
+            }
+        }
+
+        let processes = self.locking_processes.clone();
+        let files = &self.files;
+
+        let theme = cx.theme();
+        let bg = theme.background;
+        let fg = theme.foreground;
+        let muted_fg = theme.muted_foreground;
+        let border = theme.border;
+        let warning_color = theme.warning;
+        let success_color = theme.success;
+        let danger_color = theme.danger;
+
+        let file_count = files.len();
+
+        let mut content = div().flex().flex_col().size_full().bg(bg);
+
+        // ── Header ──
+        match &self.phase {
+            UnlockPhase::Confirm => {
+                content = content.child(
+                    self.render_header(fg, muted_fg, "文件解锁", "帮助你解锁被其他进程占用的文件或文件夹", None),
+                );
+            }
+            UnlockPhase::Working => {
+                content = content.child(
+                    self.render_header(fg, muted_fg, "正在解锁...", "正在终止占用进程", Some(muted_fg)),
+                );
+            }
+            UnlockPhase::Success { killed } => {
+                content = content.child(
+                    div()
+                        .flex().flex_row().items_center().px_4().pt_4().pb_2()
+                        .child(
+                            div().flex().flex_col().gap_1()
+                                .child(
+                                    div().flex().flex_row().items_center().gap_2()
+                                        .child(
+                                            gpui_component::Icon::new(IconName::CircleCheck)
+                                                .xsmall()
+                                                .text_color(success_color),
+                                        )
+                                        .child(
+                                            div().text_base().font_weight(FontWeight::BOLD)
+                                                .text_color(fg).child("解锁成功"),
+                                        ),
+                                )
+                                .child(
+                                    div().text_xs().text_color(muted_fg)
+                                        .child(format!("已终止 {} 个占用进程", killed)),
+                                ),
+                        ),
+                );
+            }
+            UnlockPhase::Failed { killed, failures } => {
+                content = content.child(
+                    div()
+                        .flex().flex_row().items_center().px_4().pt_4().pb_2()
+                        .child(
+                            div().flex().flex_col().gap_1()
+                                .child(
+                                    div().flex().flex_row().items_center().gap_2()
+                                        .child(
+                                            gpui_component::Icon::new(IconName::TriangleAlert)
+                                                .xsmall()
+                                                .text_color(danger_color),
+                                        )
+                                        .child(
+                                            div().text_base().font_weight(FontWeight::BOLD)
+                                                .text_color(fg).child("部分解锁失败"),
+                                        ),
+                                )
+                                .child(
+                                    div().text_xs().text_color(muted_fg)
+                                        .child(format!(
+                                            "成功 {} 个，失败 {} 个",
+                                            killed, failures.len()
+                                        )),
+                                ),
+                        ),
+                );
+            }
+        }
+
+        // ── 文件列表 (Confirm / Working) ──
+        if matches!(self.phase, UnlockPhase::Confirm | UnlockPhase::Working) {
+            content = content.child(
+                div().px_4().py_1().text_xs().text_color(muted_fg)
+                    .child(format!("将对以下 {} 个文件/文件夹进行解锁", file_count)),
+            );
+
+            let mut file_list = div()
+                .flex().flex_col().mx_4().rounded_md()
+                .border_1().border_color(border)
+                .max_h(px(120.0)).overflow_hidden();
+
+            file_list = file_list.child(
+                div().flex().flex_row().items_center().px_3().py_1p5()
+                    .bg(theme.secondary.opacity(0.3)).border_b_1().border_color(border)
+                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted_fg).child("文件/文件夹名称"))
+                    .child(div().w(px(60.0)).text_xs().font_weight(FontWeight::MEDIUM).text_color(muted_fg).text_right().child("状态")),
+            );
+
+            let status_text = if matches!(self.phase, UnlockPhase::Working) { "解锁中" } else { "待解锁" };
+            for file in files {
+                file_list = file_list.child(
+                    div().flex().flex_row().items_center().px_3().py_1p5()
+                        .border_b_1().border_color(border.opacity(0.3))
+                        .child(div().flex_1().text_xs().text_color(fg).overflow_hidden().whitespace_nowrap().child(file.file_name.clone()))
+                        .child(div().w(px(60.0)).text_xs().text_color(warning_color).text_right().child(status_text)),
+                );
+            }
+
+            content = content.child(file_list);
+        }
+
+        // ── 锁定进程详情 (Confirm / Working) ──
+        if matches!(self.phase, UnlockPhase::Confirm | UnlockPhase::Working) && !processes.is_empty() {
+            let first_file_name = files.first().map(|f| f.file_name.clone()).unwrap_or_default();
+            content = content.child(
+                div().flex().flex_col().gap_1().px_4().pt_3()
+                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(fg)
+                        .child(format!("{} 被以下程序锁定", first_file_name)))
+                    .child(self.render_process_table(&processes, theme)),
+            );
+        }
+
+        // ── 失败详情 ──
+        if let UnlockPhase::Failed { failures, .. } = &self.phase {
+            let mut fail_list = div()
+                .flex().flex_col().mx_4().mt_2().rounded_md()
+                .border_1().border_color(danger_color.opacity(0.3))
+                .max_h(px(150.0)).overflow_hidden();
+
+            fail_list = fail_list.child(
+                div().flex().flex_row().items_center().px_3().py_1p5()
+                    .bg(danger_color.opacity(0.08)).border_b_1().border_color(danger_color.opacity(0.2))
+                    .child(div().w(px(120.0)).text_xs().font_weight(FontWeight::MEDIUM).text_color(danger_color).child("进程"))
+                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(danger_color).child("失败原因")),
+            );
+
+            for f in failures {
+                fail_list = fail_list.child(
+                    div().flex().flex_row().items_center().px_3().py_1p5()
+                        .border_b_1().border_color(border.opacity(0.3))
+                        .child(div().w(px(120.0)).text_xs().text_color(fg).child(format!("{} ({})", f.name, f.pid)))
+                        .child(div().flex_1().text_xs().text_color(danger_color).overflow_hidden().whitespace_nowrap().child(f.error.clone())),
+                );
+            }
+
+            content = content.child(fail_list);
+        }
+
+        // ── 底部按钮 ──
+        content = content.child(
+            div().flex().flex_row().justify_end().items_center().gap_2()
+                .mt_auto().px_4().py_3().border_t_1().border_color(border)
+                .when(matches!(self.phase, UnlockPhase::Confirm), |this| {
+                    let signal = self.confirm_signal.clone();
+                    this.child(
+                        Button::new("unlock-btn").primary().label("全部解锁")
+                            .on_click(move |_, _, cx| {
+                                signal.store(true, Ordering::Release);
+                                cx.refresh_windows();
+                            }),
+                    )
+                    .child(
+                        Button::new("cancel-btn").ghost().label("取消")
+                            .on_click(|_, _, cx| { cx.quit(); }),
+                    )
+                })
+                .when(matches!(self.phase, UnlockPhase::Working), |this| {
+                    this.child(div().text_xs().text_color(muted_fg).child("正在处理，请稍候..."))
+                })
+                .when(matches!(self.phase, UnlockPhase::Success { .. }), |this| {
+                    this.child(
+                        Button::new("close-btn-ok").primary().label("好的")
+                            .on_click(|_, _, cx| { cx.quit(); }),
+                    )
+                })
+                .when(matches!(self.phase, UnlockPhase::Failed { .. }), |this| {
+                    this.child(
+                        Button::new("close-btn").primary().label("关闭")
+                            .on_click(|_, _, cx| { cx.quit(); }),
+                    )
+                }),
+        );
+
+        content
+    }
+}
+
+impl UnlockProgressWindow {
+    fn render_header(
+        &self,
+        fg: Hsla,
+        muted_fg: Hsla,
+        title: &str,
+        subtitle: &str,
+        spinner_color: Option<Hsla>,
+    ) -> Div {
+        div()
+            .flex().flex_row().items_center().px_4().pt_4().pb_2()
+            .child(
+                div().flex().flex_col().gap_1()
+                    .child(
+                        div().flex().flex_row().items_center().gap_2()
+                            .child(
+                                div().text_base().font_weight(FontWeight::BOLD)
+                                    .text_color(fg).child(title.to_string()),
+                            )
+                            .when_some(spinner_color, |this, color| {
+                                this.child(
+                                    gpui_component::Icon::new(IconName::LoaderCircle)
+                                        .xsmall()
+                                        .text_color(color)
+                                        .with_animation(
+                                            "spinner",
+                                            Animation::new(Duration::from_secs(1)).repeat(),
+                                            |icon, delta| {
+                                                icon.transform(Transformation::rotate(percentage(delta)))
+                                            },
+                                        ),
+                                )
+                            }),
+                    )
+                    .child(
+                        div().text_xs().text_color(muted_fg).child(subtitle.to_string()),
+                    ),
+            )
+    }
+}
+
+pub struct NoLockWindow {
+    _path: PathBuf,
+}
+
+impl NoLockWindow {
+    pub fn new(path: PathBuf) -> Self {
+        Self { _path: path }
+    }
+}
+
+impl Render for NoLockWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let bg = theme.background;
+        let fg = theme.foreground;
+        let border = theme.border;
+        let warning_color = theme.warning;
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(bg)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .flex_1()
+                    .gap_3()
+                    .p_6()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size_12()
+                            .rounded_full()
+                            .border_2()
+                            .border_color(warning_color)
+                            .child(
+                                div()
+                                    .text_color(warning_color)
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_xl()
+                                    .child("!"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(fg)
+                            .child("未检测到文件被占用，无需解锁"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(border)
+                    .child(
+                        Button::new("ok-btn")
+                            .primary()
+                            .label("好的")
+                            .on_click(|_, _, cx| {
+                                cx.quit();
+                            }),
+                    ),
+            )
+    }
+}
+
+pub fn run_unlock_dialog(
+    path: PathBuf,
+    files: Vec<UnlockFileInfo>,
+    locking_processes: Vec<crate::winapi::LockingProcess>,
+) -> anyhow::Result<()> {
+    let app = Application::new().with_assets(Assets);
+
+    app.run(move |cx| {
+        gpui_component::init(cx);
+
+        let path_clone = path.clone();
+
+        if locking_processes.is_empty() {
+            let window_bounds = Bounds::centered(None, size(px(380.0), px(200.0)), cx);
+
+            cx.spawn(async move |cx| {
+                let window_options = WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("文件解锁".into()),
+                        ..Default::default()
+                    }),
+                    window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+                    window_min_size: Some(size(px(300.0), px(150.0))),
+                    kind: WindowKind::PopUp,
+                    is_movable: true,
+                    ..Default::default()
+                };
+
+                cx.open_window(window_options, |window, cx| {
+                    let view = cx.new(|_| NoLockWindow::new(path_clone));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })?;
+
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        } else {
+            let procs_clone = locking_processes.clone();
+            let proc_count = locking_processes.len();
+            let file_count = files.len();
+            let base_height = 280;
+            let file_rows_height = std::cmp::min(file_count as i32, 3) * 28;
+            let proc_rows_height = std::cmp::min(proc_count as i32, 4) * 28;
+            let window_height = std::cmp::min(
+                520,
+                base_height + file_rows_height + proc_rows_height,
+            ) as f32;
+            let window_bounds = Bounds::centered(None, size(px(520.0), px(window_height)), cx);
+
+            cx.spawn(async move |cx| {
+                let window_options = WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("文件解锁".into()),
+                        ..Default::default()
+                    }),
+                    window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+                    window_min_size: Some(size(px(420.0), px(300.0))),
+                    kind: WindowKind::PopUp,
+                    is_movable: true,
+                    ..Default::default()
+                };
+
+                cx.open_window(window_options, |window, cx| {
+                    let view = cx.new(|_| {
+                        UnlockProgressWindow::new(files, procs_clone)
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })?;
+
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        }
+    });
+
+    Ok(())
+}

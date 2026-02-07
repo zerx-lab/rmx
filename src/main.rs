@@ -742,11 +742,94 @@ fn run_unlock(args: &Args) -> Result<(), Error> {
 
         let is_dir = rmx::winapi::is_directory(path);
         if is_dir {
+            #[cfg(windows)]
+            if args.gui {
+                unlock_directory_gui(path)?;
+            } else {
+                unlock_directory(path, verbose)?;
+            }
+
+            #[cfg(not(windows))]
             unlock_directory(path, verbose)?;
         } else {
+            #[cfg(windows)]
+            if args.gui {
+                unlock_single_file_gui(path)?;
+            } else {
+                unlock_single_file(path, verbose)?;
+            }
+
+            #[cfg(not(windows))]
             unlock_single_file(path, verbose)?;
         }
     }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn unlock_directory_gui(path: &Path) -> Result<(), Error> {
+    let tree = tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
+
+    let mut all_files: Vec<PathBuf> = Vec::new();
+    for files in tree.dir_files.values() {
+        all_files.extend(files.iter().cloned());
+    }
+
+    let mut all_dirs: Vec<PathBuf> = tree.dirs.clone();
+    all_dirs.push(path.to_path_buf());
+
+    let total_items = all_files.len() + all_dirs.len();
+    if total_items == 0 {
+        return Ok(());
+    }
+
+    let mut all_locking_procs: Vec<rmx::winapi::LockingProcess> = Vec::new();
+
+    #[cfg(windows)]
+    {
+        if !all_files.is_empty() {
+            if let Ok(procs) = rmx::winapi::find_locking_processes_batch(&all_files) {
+                all_locking_procs.extend(procs);
+            }
+        }
+
+        if !all_dirs.is_empty() {
+            if let Ok(procs) = rmx::winapi::find_locking_processes_batch(&all_dirs) {
+                all_locking_procs.extend(procs);
+            }
+        }
+
+        all_locking_procs.sort_by(|a, b| a.pid.cmp(&b.pid));
+        all_locking_procs.dedup_by(|a, b| a.pid == b.pid);
+    }
+
+    let file_infos = vec![progress_ui::UnlockFileInfo {
+        file_name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string()),
+        full_path: path.to_path_buf(),
+    }];
+
+    let _ = progress_ui::run_unlock_dialog(path.to_path_buf(), file_infos, all_locking_procs);
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn unlock_single_file_gui(path: &Path) -> Result<(), Error> {
+    let locking_processes = rmx::winapi::find_locking_processes(path).unwrap_or_default();
+
+    let file_infos = vec![progress_ui::UnlockFileInfo {
+        file_name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string()),
+        full_path: path.to_path_buf(),
+    }];
+
+    let _ = progress_ui::run_unlock_dialog(path.to_path_buf(), file_infos, locking_processes);
 
     Ok(())
 }
@@ -756,7 +839,6 @@ fn unlock_single_file(path: &Path, verbose: bool) -> Result<(), Error> {
         println!("unlocking '{}'...", path.display());
     }
 
-    // Step 1: Restart Manager — 精准杀掉占用进程
     match rmx::winapi::kill_locking_processes(path, verbose) {
         Ok(killed) if !killed.is_empty() => {
             for p in &killed {
@@ -766,7 +848,6 @@ fn unlock_single_file(path: &Path, verbose: bool) -> Result<(), Error> {
         _ => {}
     }
 
-    // Step 2: 暴力句柄扫描兜底
     let paths = [path.to_path_buf()];
     match rmx::winapi::force_close_file_handles(&paths, verbose) {
         Ok(count) if count > 0 => {
@@ -787,13 +868,11 @@ fn unlock_directory(path: &Path, verbose: bool) -> Result<(), Error> {
 
     let tree = tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
 
-    // 收集所有文件路径
     let mut all_files: Vec<PathBuf> = Vec::new();
     for files in tree.dir_files.values() {
         all_files.extend(files.iter().cloned());
     }
 
-    // 也把目录本身和所有子目录加入解锁列表
     let mut all_dirs: Vec<PathBuf> = tree.dirs.clone();
     all_dirs.push(path.to_path_buf());
 
@@ -809,11 +888,9 @@ fn unlock_directory(path: &Path, verbose: bool) -> Result<(), Error> {
         return Ok(());
     }
 
-    // Step 1: 批量用 Restart Manager 解锁文件
     let mut total_killed = 0usize;
     let mut total_handles_closed = 0usize;
 
-    // 用批量 API 处理文件（Restart Manager 支持批量注册）
     if !all_files.is_empty() {
         match rmx::winapi::kill_locking_processes_batch(&all_files, verbose) {
             Ok(killed) => {
@@ -832,7 +909,6 @@ fn unlock_directory(path: &Path, verbose: bool) -> Result<(), Error> {
         }
     }
 
-    // 对目录也做 Restart Manager
     if !all_dirs.is_empty() {
         match rmx::winapi::kill_locking_processes_batch(&all_dirs, verbose) {
             Ok(killed) => {
@@ -851,7 +927,6 @@ fn unlock_directory(path: &Path, verbose: bool) -> Result<(), Error> {
         }
     }
 
-    // Step 2: 暴力句柄扫描兜底 — 合并所有路径一次性扫描
     let mut all_paths: Vec<PathBuf> = Vec::with_capacity(all_files.len() + all_dirs.len());
     all_paths.extend(all_files);
     all_paths.extend(all_dirs);

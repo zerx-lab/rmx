@@ -130,8 +130,6 @@ pub fn uninstall() -> io::Result<()> {
 
     let dll_path = get_shell_dll_path()?;
     if dll_path.exists() {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
         if let Err(e) = std::fs::remove_file(&dll_path) {
             if is_file_locked_error(&e) {
                 retry_with_explorer_restart(&dll_path, || std::fs::remove_file(&dll_path))?;
@@ -203,12 +201,24 @@ fn is_file_locked_error(e: &io::Error) -> bool {
 // ── Explorer restart ─────────────────────────────────────────────────────
 
 /// DLL 被占用时的重试策略:
-/// 1. force_close_file_handles → 重试
-/// 2. 仍失败则杀 explorer.exe → 重试 → 重启 explorer.exe
+/// 1. Restart Manager 快速定位占用进程 → 杀进程 → 重试
+/// 2. 仍失败则 force_close_file_handles 句柄扫描兜底 → 重试
+/// 3. 仍失败则杀 explorer.exe → 重试 → 重启 explorer.exe
 fn retry_with_explorer_restart<F>(dll_path: &Path, op: F) -> io::Result<()>
 where
     F: Fn() -> io::Result<()>,
 {
+    // Step 1: Restart Manager 快速查找占用进程并杀掉（毫秒级）
+    let _ = winapi::kill_locking_processes(dll_path, false);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    match op() {
+        Ok(()) => return Ok(()),
+        Err(e) if !is_file_locked_error(&e) => return Err(e),
+        Err(_) => {}
+    }
+
+    // Step 2: RM 没能解决，回退到句柄扫描（较慢但更彻底）
     let _ = winapi::force_close_file_handles(&[dll_path.to_path_buf()], false);
     std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -218,6 +228,7 @@ where
         Err(_) => {}
     }
 
+    // Step 3: 仍然失败，杀 explorer 兜底
     eprintln!(
         "DLL 被占用，正在重启 Explorer...{}",
         locking_processes_hint(dll_path)

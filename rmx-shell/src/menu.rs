@@ -218,7 +218,7 @@ fn build_command_line(exe_path: &str, path: &PathBuf, action: &MenuAction) -> St
             }
         }
         MenuAction::Unlock => {
-            format!("\"{}\" --unlock -v \"{}\"", exe_path, path_str)
+            format!("\"{}\" --unlock --gui \"{}\"", exe_path, path_str)
         }
     }
 }

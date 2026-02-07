@@ -389,6 +389,35 @@ where
 pub struct LockingProcess {
     pub pid: u32,
     pub name: String,
+    /// Full path to the process executable (if available)
+    pub exe_path: Option<String>,
+}
+
+/// Get the full executable path for a process by PID
+#[cfg(windows)]
+fn get_process_exe_path(pid: u32) -> Option<String> {
+    use windows::Win32::System::Threading::QueryFullProcessImageNameW;
+    use windows::Win32::System::Threading::PROCESS_NAME_FORMAT;
+
+    // Skip system processes
+    if pid == 0 || pid == 4 {
+        return None;
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; 1024];
+        let mut size = buf.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        );
+        CloseHandle(handle).ok();
+        result.ok()?;
+        Some(String::from_utf16_lossy(&buf[..size as usize]))
+    }
 }
 
 #[cfg(windows)]
@@ -465,7 +494,12 @@ pub fn find_locking_processes(path: &Path) -> io::Result<Vec<LockingProcess>> {
                     .unwrap_or(info.strAppName.len());
                 let name = String::from_utf16_lossy(&info.strAppName[..name_len]);
 
-                processes.push(LockingProcess { pid, name });
+                let exe_path = get_process_exe_path(pid);
+                processes.push(LockingProcess {
+                    pid,
+                    name,
+                    exe_path,
+                });
             }
         }
     }
@@ -551,7 +585,12 @@ pub fn find_locking_processes_batch(paths: &[PathBuf]) -> io::Result<Vec<Locking
                     .position(|&c| c == 0)
                     .unwrap_or(info.strAppName.len());
                 let name = String::from_utf16_lossy(&info.strAppName[..name_len]);
-                processes.push(LockingProcess { pid, name });
+                let exe_path = get_process_exe_path(pid);
+                processes.push(LockingProcess {
+                    pid,
+                    name,
+                    exe_path,
+                });
             }
         }
     }
