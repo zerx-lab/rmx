@@ -127,9 +127,9 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
             let path_str = path.to_string_lossy();
             let flag = if path.is_dir() { "-r" } else { "" };
             let cmdline = if flag.is_empty() {
-                format!("\"{}\" --gui \"{}\"", exe_path, path_str)
+                format!("\"{}\" --gui --kill-processes \"{}\"", exe_path, path_str)
             } else {
-                format!("\"{}\" {} --gui \"{}\"", exe_path, flag, path_str)
+                format!("\"{}\" {} --gui --kill-processes \"{}\"", exe_path, flag, path_str)
             };
 
             let mut cmdline_wide: Vec<u16> =

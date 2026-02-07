@@ -1,5 +1,6 @@
 use std::io::{self, ErrorKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
@@ -69,24 +70,8 @@ fn deploy_shell_dll() -> io::Result<PathBuf> {
 
     match std::fs::write(&dll_path, SHELL_DLL_BYTES) {
         Ok(()) => return Ok(dll_path),
-        Err(e) if e.raw_os_error() == Some(32) => {
-            let _ = winapi::force_close_file_handles(&[dll_path.clone()], false);
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            if let Err(e2) = std::fs::write(&dll_path, SHELL_DLL_BYTES) {
-                if e2.raw_os_error() == Some(32) {
-                    let hint = locking_processes_hint(&dll_path);
-                    return Err(io::Error::new(
-                        ErrorKind::Other,
-                        format!(
-                            "rmx-shell.dll 被占用，无法写入。{}\n\
-                             请关闭占用进程或重启 Explorer 后重试。",
-                            hint
-                        ),
-                    ));
-                }
-                return Err(e2);
-            }
+        Err(e) if is_file_locked_error(&e) => {
+            retry_with_explorer_restart(&dll_path, || std::fs::write(&dll_path, SHELL_DLL_BYTES))?;
         }
         Err(e) => return Err(e),
     }
@@ -148,25 +133,8 @@ pub fn uninstall() -> io::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         if let Err(e) = std::fs::remove_file(&dll_path) {
-            if e.raw_os_error() == Some(32) {
-                let _ = winapi::force_close_file_handles(&[dll_path.clone()], false);
-                std::thread::sleep(std::time::Duration::from_millis(100));
-
-                if let Err(e2) = std::fs::remove_file(&dll_path) {
-                    if e2.raw_os_error() == Some(32) {
-                        let hint = locking_processes_hint(&dll_path);
-                        return Err(io::Error::new(
-                            ErrorKind::Other,
-                            format!(
-                                "无法删除 rmx-shell.dll，文件被占用。{}\n\
-                                 注册表已清理，重启 Explorer 或重新登录后可手动删除: {}",
-                                hint,
-                                dll_path.display()
-                            ),
-                        ));
-                    }
-                    return Err(e2);
-                }
+            if is_file_locked_error(&e) {
+                retry_with_explorer_restart(&dll_path, || std::fs::remove_file(&dll_path))?;
             } else {
                 return Err(e);
             }
@@ -224,6 +192,57 @@ fn locking_processes_hint(path: &PathBuf) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// ERROR_ACCESS_DENIED (5) 或 ERROR_SHARING_VIOLATION (32)
+/// Explorer 加载 COM DLL 时，删除文件可能返回其中任一错误码
+fn is_file_locked_error(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5) | Some(32))
+}
+
+// ── Explorer restart ─────────────────────────────────────────────────────
+
+/// DLL 被占用时的重试策略:
+/// 1. force_close_file_handles → 重试
+/// 2. 仍失败则杀 explorer.exe → 重试 → 重启 explorer.exe
+fn retry_with_explorer_restart<F>(dll_path: &Path, op: F) -> io::Result<()>
+where
+    F: Fn() -> io::Result<()>,
+{
+    let _ = winapi::force_close_file_handles(&[dll_path.to_path_buf()], false);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    match op() {
+        Ok(()) => return Ok(()),
+        Err(e) if !is_file_locked_error(&e) => return Err(e),
+        Err(_) => {}
+    }
+
+    eprintln!(
+        "DLL 被占用，正在重启 Explorer...{}",
+        locking_processes_hint(&dll_path.to_path_buf())
+    );
+
+    kill_explorer();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let result = op();
+
+    start_explorer();
+
+    result
+}
+
+fn kill_explorer() {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "explorer.exe"])
+        .output();
+}
+
+fn start_explorer() {
+    let _ = Command::new("cmd")
+        .args(["/C", "start", "explorer.exe"])
+        .output();
 }
 
 // ── Registry helpers ──────────────────────────────────────────────────────

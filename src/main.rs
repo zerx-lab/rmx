@@ -122,32 +122,19 @@ fn main() {
 #[cfg(windows)]
 fn run_command(command: Command) -> Result<(), std::io::Error> {
     use rmx::context_menu;
-    use std::io::{Error, ErrorKind};
 
     match command {
-        Command::Init => match context_menu::init() {
-            Ok(()) => {
-                println!("rmx shell extension has been initialized.");
-                println!("Right-click on any file or folder to see 'Delete with rmx'.");
-                Ok(())
-            }
-            Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "Administrator privileges required. Run as administrator.",
-            )),
-            Err(e) => Err(e),
-        },
-        Command::Uninstall => match context_menu::uninstall() {
-            Ok(()) => {
-                println!("rmx shell extension has been removed.");
-                Ok(())
-            }
-            Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "Administrator privileges required. Run as administrator.",
-            )),
-            Err(e) => Err(e),
-        },
+        Command::Init => {
+            context_menu::init()?;
+            println!("rmx shell extension has been initialized.");
+            println!("Right-click on any file or folder to see 'Delete with rmx'.");
+            Ok(())
+        }
+        Command::Uninstall => {
+            context_menu::uninstall()?;
+            println!("rmx shell extension has been removed.");
+            Ok(())
+        }
     }
 }
 
