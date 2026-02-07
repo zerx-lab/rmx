@@ -1,12 +1,12 @@
 {
-    "version": "0.2.2",
+    "version": "0.2.3",
     "description": "Fast parallel directory deletion for Windows - blazingly fast removal of node_modules, target, and other large directories",
     "homepage": "https://github.com/zerx-lab/rmx",
     "license": "MIT|Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/zerx-lab/rmx/releases/download/v0.2.2/rmx-0.2.2-x86_64-pc-windows-msvc.zip",
-            "hash": "37ecf7d6578eaf77989c561f4056b3d21a445097524324fd684f8509c0106ed9"
+            "url": "https://github.com/zerx-lab/rmx/releases/download/v0.2.3/rmx-0.2.3-x86_64-pc-windows-msvc.zip",
+            "hash": "d0025aeebad5a3582f0676897b2a97c0237ddf1f4a676c1ffc20cf2adac563d1"
         }
     },
     "bin": "rmx.exe",
