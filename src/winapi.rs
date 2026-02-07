@@ -10,9 +10,9 @@ use windows::core::PCWSTR;
 use windows::core::PWSTR;
 #[cfg(windows)]
 use windows::Wdk::Storage::FileSystem::{
-    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
-    FILE_DISPOSITION_INFORMATION_EX, FILE_DISPOSITION_INFORMATION_EX_FLAGS,
-    FILE_DISPOSITION_POSIX_SEMANTICS,
+    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK,
+    FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFORMATION_EX,
+    FILE_DISPOSITION_INFORMATION_EX_FLAGS, FILE_DISPOSITION_POSIX_SEMANTICS,
 };
 #[cfg(windows)]
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS};
@@ -147,10 +147,11 @@ fn is_retryable_error(code: i32) -> bool {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
     const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_DIR_NOT_EMPTY: i32 = 145;
 
     matches!(
         code,
-        ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_ACCESS_DENIED
+        ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_ACCESS_DENIED | ERROR_DIR_NOT_EMPTY
     )
 }
 
@@ -225,7 +226,8 @@ unsafe fn posix_delete_file(wide_path: &[u16]) -> io::Result<()> {
         Flags: FILE_DISPOSITION_INFORMATION_EX_FLAGS(
             FILE_DISPOSITION_DELETE.0
                 | FILE_DISPOSITION_POSIX_SEMANTICS.0
-                | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE.0,
+                | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE.0
+                | FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK.0,
         ),
     };
 
@@ -258,7 +260,8 @@ unsafe fn posix_delete_dir(wide_path: &[u16]) -> io::Result<()> {
         Flags: FILE_DISPOSITION_INFORMATION_EX_FLAGS(
             FILE_DISPOSITION_DELETE.0
                 | FILE_DISPOSITION_POSIX_SEMANTICS.0
-                | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE.0,
+                | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE.0
+                | FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK.0,
         ),
     };
 
@@ -314,7 +317,22 @@ where
             Err(_) => {
                 let err = io::Error::last_os_error();
                 match err.raw_os_error() {
-                    Some(2) | Some(3) => return Ok(()), // FILE_NOT_FOUND / PATH_NOT_FOUND (broken symlink)
+                    Some(2) => {
+                        // ERROR_FILE_NOT_FOUND - directory may be empty (ok to skip)
+                        // This can happen with broken symlinks pointing to inaccessible paths
+                        return Ok(());
+                    }
+                    Some(3) => {
+                        // ERROR_PATH_NOT_FOUND - path is invalid/inaccessible
+                        // For broken symlinks, this is expected; silently skip
+                        // For normal directories, this indicates the path was deleted by another thread
+                        return Ok(());
+                    }
+                    Some(5) => {
+                        // ERROR_ACCESS_DENIED - permission issue, might be temporary
+                        // Don't silently skip - this could lose files
+                        return Err(err);
+                    }
                     _ => return Err(err),
                 }
             }

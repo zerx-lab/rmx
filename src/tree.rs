@@ -112,10 +112,8 @@ fn scan_parallel(
     if let Err(e) = crate::winapi::enumerate_files(dir, |entry| {
         if entry.is_symlink {
             if entry.is_dir {
-                // Symlink directories (junctions): treat as leaf dirs, delete with remove_dir
                 symlink_dirs.push(entry.path);
             } else {
-                // Symlink files: delete with delete_file
                 files.push(entry.path);
             }
         } else if entry.is_dir {
@@ -126,7 +124,11 @@ fn scan_parallel(
         }
         Ok(())
     }) {
-        eprintln!("Warning: Cannot read {}: {}", dir.display(), e);
+        eprintln!(
+            "Warning: Skipping directory due to enumeration error {}: {}",
+            dir.display(),
+            e
+        );
         return;
     }
 
