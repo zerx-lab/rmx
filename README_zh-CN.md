@@ -11,9 +11,9 @@
 
 # rmx
 
-**⚡ Windows 高性能并行目录删除工具**
+**⚡ Windows 高性能并行删除工具**
 
-*以闪电般的速度删除 `node_modules` 和 `target` 目录*
+*快速删除文件、文件夹，并解除文件占用问题*
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D6?logo=windows)](https://www.microsoft.com/windows)
@@ -34,15 +34,18 @@
 | **⚡ rmx** | **514ms** | **1.00x** |
 | PowerShell Remove-Item | 1,150ms | 慢 2.2 倍 |
 
-## 🚀 为什么 rmx 这么快？
+## 🚀 核心特性
 
 | 特性 | 说明 |
 |------|------|
+| 📁 **文件和文件夹** | 无缝支持删除单个文件、目录和批量删除 |
 | 🔥 **POSIX 删除语义** | 使用 `FILE_DISPOSITION_POSIX_SEMANTICS` 实现即时命名空间移除 |
 | ⚡ **并行处理** | 多线程工作器配合依赖感知调度 |
 | 🎯 **直接调用 API** | 绕过高层抽象，直接使用原生 Windows API |
 | 📏 **长路径支持** | 使用 `\\?\` 前缀处理超过 260 字符的路径 |
 | 🔄 **自动重试** | 对锁定文件采用指数退避重试策略 |
+| 🔓 **删除被占用项** | 使用 `--kill-processes` 终止占用文件/文件夹的进程，然后删除它们 |
+| 🔓 **解除占用** | 使用 `--unlock` 仅解除文件/文件夹的占用（关闭句柄、终止进程），不删除 |
 
 ## 📦 安装
 
@@ -68,13 +71,55 @@ cargo install --path .
 
 ## 📖 使用方法
 
+### 删除文件夹
+
 ```bash
-# 删除单个目录
+# 删除单个文件夹
 rmx ./node_modules
 
-# 删除多个目录
+# 删除多个文件夹
 rmx ./target ./node_modules ./dist
 
+# 递归删除文件夹及其内容
+rmx -r ./build_output
+```
+
+### 删除文件
+
+```bash
+# 删除单个文件
+rmx ./log.txt
+
+# 删除多个文件
+rmx ./file1.txt ./file2.log ./cache.db
+```
+
+### 删除被占用的文件或文件夹
+
+```bash
+# 终止占用进程，然后删除文件或文件夹
+rmx --kill-processes ./locked_directory
+
+# 强制模式：终止占用进程、递归删除被占用的文件和文件夹
+rmx -rf --kill-processes ./path
+```
+
+### 解除文件或文件夹占用（不删除）
+
+```bash
+# 仅解除单个文件的占用
+rmx --unlock ./locked_file.txt
+
+# 解除文件夹的占用
+rmx --unlock ./locked_directory
+
+# 使用详细模式查看终止的进程
+rmx --unlock -v ./path
+```
+
+### 预览与安全
+
+```bash
 # 预览模式（仅扫描不删除）
 rmx -n ./node_modules
 
@@ -83,9 +128,6 @@ rmx -v --stats ./target
 
 # 强制删除（跳过确认）
 rmx --force ./path
-
-# 强制终止占用文件的进程
-rmx -rf --kill-processes ./locked_directory
 ```
 
 ### Shell 扩展
@@ -112,7 +154,8 @@ rmx init
 | `-v, --verbose` | 显示进度和错误信息 |
 | `--stats` | 显示详细统计信息 |
 | `--no-preserve-root` | 不特殊处理根目录 |
-| `--kill-processes` | 强制终止占用文件的进程（谨慎使用） |
+| `--kill-processes` | 终止占用文件/文件夹的进程，然后删除它们 |
+| `--unlock` | 仅解除文件/文件夹的占用（关闭句柄），不删除 |
 
 ## 🛡️ 安全特性
 

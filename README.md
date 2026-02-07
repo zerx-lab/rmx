@@ -11,9 +11,9 @@
 
 # rmx
 
-**⚡ Fast Parallel Directory Deletion for Windows**
+**⚡ Fast Parallel Deletion for Windows**
 
-*Delete `node_modules` and `target` directories at blazing speed*
+*Quickly delete files, folders, and resolve file locking issues at blazing speed*
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D6?logo=windows)](https://www.microsoft.com/windows)
@@ -34,15 +34,18 @@ Benchmark on 5,301 items (5,000 files, 301 directories):
 | **⚡ rmx** | **514ms** | **1.00x** |
 | PowerShell Remove-Item | 1,150ms | 2.2x slower |
 
-## 🚀 Why rmx is Fast
+## 🚀 Key Features
 
 | Feature | Description |
 |---------|-------------|
+| 📁 **Files & Folders** | Delete individual files, directories, and batch deletions seamlessly |
 | 🔥 **POSIX Delete** | Uses `FILE_DISPOSITION_POSIX_SEMANTICS` for immediate namespace removal |
 | ⚡ **Parallel** | Multi-threaded workers with dependency-aware scheduling |
 | 🎯 **Direct API** | Bypasses high-level abstractions using native Windows API |
 | 📏 **Long Paths** | Handles paths >260 characters with `\\?\` prefix |
 | 🔄 **Auto Retry** | Exponential backoff for locked files |
+| 🔓 **Delete Locked Items** | Terminate processes locking files/directories and delete them with `--kill-processes` |
+| 🔓 **Unlock Items** | Unlock files/directories by closing handles and terminating locking processes without deletion using `--unlock` |
 
 ## 📦 Installation
 
@@ -68,24 +71,63 @@ Download the latest release from [GitHub Releases](https://github.com/zerx-lab/r
 
 ## 📖 Usage
 
+### Delete Directories
+
 ```bash
-# Delete a directory
+# Delete a single directory
 rmx ./node_modules
 
-# Delete multiple directories
+# Delete multiple directories at once
 rmx ./target ./node_modules ./dist
 
-# Dry run (preview what would be deleted)
+# Recursively delete directory and contents
+rmx -r ./build_output
+```
+
+### Delete Files
+
+```bash
+# Delete a single file
+rmx ./log.txt
+
+# Delete multiple files
+rmx ./file1.txt ./file2.log ./cache.db
+```
+
+### Delete Locked Files or Directories
+
+```bash
+# Terminate processes locking files/directories and delete them
+rmx --kill-processes ./locked_directory
+
+# Force termination, recursive deletion with locking process cleanup
+rmx -rf --kill-processes ./path
+```
+
+### Unlock Files or Directories (Without Deleting)
+
+```bash
+# Only unlock a file without deleting it
+rmx --unlock ./locked_file.txt
+
+# Unlock a directory without deleting it
+rmx --unlock ./locked_directory
+
+# Unlock with verbose output to see process details
+rmx --unlock -v ./path
+```
+
+### Preview & Safety
+
+```bash
+# Dry run (preview what would be deleted without actually deleting)
 rmx -n ./node_modules
 
-# Verbose mode with statistics
+# Verbose mode with detailed statistics
 rmx -v --stats ./target
 
-# Force deletion (skip confirmation)
+# Force deletion (skip confirmation prompt)
 rmx --force ./path
-
-# Kill processes that are locking files
-rmx -rf --kill-processes ./locked_directory
 ```
 
 ### Shell Extension
@@ -112,7 +154,8 @@ After initialization, right-click any file or folder to see "Delete with rmx" op
 | `-v, --verbose` | Show progress and errors |
 | `--stats` | Show detailed statistics |
 | `--no-preserve-root` | Do not treat '/' specially |
-| `--kill-processes` | Kill processes locking files (use with caution) |
+| `--kill-processes` | Terminate processes locking files/directories, then delete them |
+| `--unlock` | Only unlock files/directories (close handles) without deleting |
 
 ## 🛡️ Safety Features
 
