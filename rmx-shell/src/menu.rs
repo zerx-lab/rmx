@@ -15,8 +15,12 @@ use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const MENU_TEXT: PCWSTR = w!("Delete with rmx");
-const VERB: &str = "rmxdelete";
+const MENU_DELETE_TEXT: PCWSTR = w!("Delete with rmx");
+const MENU_UNLOCK_TEXT: PCWSTR = w!("Unlock with rmx");
+const VERB_DELETE: &str = "rmxdelete";
+const VERB_UNLOCK: &str = "rmxunlock";
+const CMD_ID_DELETE: u32 = 0;
+const CMD_ID_UNLOCK: u32 = 1;
 
 #[implement(IShellExtInit, IContextMenu)]
 pub struct RmxContextMenu {
@@ -90,31 +94,46 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
                 hmenu,
                 indexmenu,
                 MF_STRING | MF_BYPOSITION,
-                idcmdfirst as usize,
-                MENU_TEXT,
+                (idcmdfirst + CMD_ID_DELETE) as usize,
+                MENU_DELETE_TEXT,
+            )?;
+            InsertMenuW(
+                hmenu,
+                indexmenu + 1,
+                MF_STRING | MF_BYPOSITION,
+                (idcmdfirst + CMD_ID_UNLOCK) as usize,
+                MENU_UNLOCK_TEXT,
             )?;
         }
 
-        // QueryContextMenu must return MAKE_HRESULT(SEVERITY_SUCCESS, 0, id_offset + 1).
-        // Result<()> → HRESULT always maps Ok(()) to S_OK(0), losing the count.
-        // Err path preserves the raw HRESULT code via Error::code().
-        Err(Error::from(HRESULT(1)))
+        // Return item count = 2 (two menu items added)
+        Err(Error::from(HRESULT(2)))
     }
 
     fn InvokeCommand(&self, pici: *const CMINVOKECOMMANDINFO) -> windows::core::Result<()> {
         let info = unsafe { &*pici };
 
-        let is_verb = (info.lpVerb.0 as usize) > 0xFFFF;
-        if is_verb {
+        let cmd_id = info.lpVerb.0 as usize;
+        let is_verb = cmd_id > 0xFFFF;
+
+        let action = if is_verb {
             let verb_ptr = info.lpVerb.0 as *const u8;
             let verb = unsafe {
                 let len = (0..).find(|&i| *verb_ptr.add(i) == 0).unwrap_or(0);
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(verb_ptr, len))
             };
-            if verb != VERB {
-                return Err(E_INVALIDARG.into());
+            match verb {
+                v if v == VERB_DELETE => MenuAction::Delete,
+                v if v == VERB_UNLOCK => MenuAction::Unlock,
+                _ => return Err(E_INVALIDARG.into()),
             }
-        }
+        } else {
+            match cmd_id as u32 {
+                CMD_ID_DELETE => MenuAction::Delete,
+                CMD_ID_UNLOCK => MenuAction::Unlock,
+                _ => return Err(E_INVALIDARG.into()),
+            }
+        };
 
         let paths = self.selected_paths.borrow();
         if paths.is_empty() {
@@ -124,42 +143,8 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
         let exe_path = get_rmx_exe_path()?;
 
         for path in paths.iter() {
-            let path_str = path.to_string_lossy();
-            let flag = if path.is_dir() { "-r" } else { "" };
-            let cmdline = if flag.is_empty() {
-                format!("\"{}\" --gui --kill-processes \"{}\"", exe_path, path_str)
-            } else {
-                format!("\"{}\" {} --gui --kill-processes \"{}\"", exe_path, flag, path_str)
-            };
-
-            let mut cmdline_wide: Vec<u16> =
-                cmdline.encode_utf16().chain(std::iter::once(0)).collect();
-
-            unsafe {
-                let mut si: STARTUPINFOW = std::mem::zeroed();
-                si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-                let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-
-                let _ = CreateProcessW(
-                    PCWSTR::null(),
-                    PWSTR(cmdline_wide.as_mut_ptr()),
-                    None,
-                    None,
-                    false,
-                    DETACHED_PROCESS,
-                    None,
-                    PCWSTR::null(),
-                    &si,
-                    &mut pi,
-                );
-
-                if !pi.hProcess.is_invalid() {
-                    let _ = windows::Win32::Foundation::CloseHandle(pi.hProcess);
-                }
-                if !pi.hThread.is_invalid() {
-                    let _ = windows::Win32::Foundation::CloseHandle(pi.hThread);
-                }
-            }
+            let cmdline = build_command_line(&exe_path, path, &action);
+            spawn_detached_process(&cmdline);
         }
 
         Ok(())
@@ -167,7 +152,7 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
 
     fn GetCommandString(
         &self,
-        _idcmd: usize,
+        idcmd: usize,
         utype: u32,
         _preserved: *const u32,
         pszname: PSTR,
@@ -176,9 +161,15 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
         const GCS_VERBA: u32 = 0;
         const GCS_VERBW: u32 = 4;
 
+        let verb = match idcmd as u32 {
+            CMD_ID_DELETE => VERB_DELETE,
+            CMD_ID_UNLOCK => VERB_UNLOCK,
+            _ => return Err(E_INVALIDARG.into()),
+        };
+
         match utype {
             GCS_VERBA => {
-                let verb_bytes = VERB.as_bytes();
+                let verb_bytes = verb.as_bytes();
                 let copy_len = verb_bytes.len().min(cchmax as usize - 1);
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -190,7 +181,7 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
                 }
             }
             GCS_VERBW => {
-                let verb_wide: Vec<u16> = VERB.encode_utf16().chain(std::iter::once(0)).collect();
+                let verb_wide: Vec<u16> = verb.encode_utf16().chain(std::iter::once(0)).collect();
                 let copy_len = verb_wide.len().min(cchmax as usize);
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -204,6 +195,61 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
         }
 
         Ok(())
+    }
+}
+
+enum MenuAction {
+    Delete,
+    Unlock,
+}
+
+fn build_command_line(exe_path: &str, path: &PathBuf, action: &MenuAction) -> String {
+    let path_str = path.to_string_lossy();
+    match action {
+        MenuAction::Delete => {
+            let flag = if path.is_dir() { "-r" } else { "" };
+            if flag.is_empty() {
+                format!("\"{}\" --gui --kill-processes \"{}\"", exe_path, path_str)
+            } else {
+                format!(
+                    "\"{}\" {} --gui --kill-processes \"{}\"",
+                    exe_path, flag, path_str
+                )
+            }
+        }
+        MenuAction::Unlock => {
+            format!("\"{}\" --unlock -v \"{}\"", exe_path, path_str)
+        }
+    }
+}
+
+fn spawn_detached_process(cmdline: &str) {
+    let mut cmdline_wide: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+
+        let _ = CreateProcessW(
+            PCWSTR::null(),
+            PWSTR(cmdline_wide.as_mut_ptr()),
+            None,
+            None,
+            false,
+            DETACHED_PROCESS,
+            None,
+            PCWSTR::null(),
+            &si,
+            &mut pi,
+        );
+
+        if !pi.hProcess.is_invalid() {
+            let _ = windows::Win32::Foundation::CloseHandle(pi.hProcess);
+        }
+        if !pi.hThread.is_invalid() {
+            let _ = windows::Win32::Foundation::CloseHandle(pi.hThread);
+        }
     }
 }
 
