@@ -295,15 +295,24 @@ fn print_summary(stats: &DeletionStats, args: &Args) {
 }
 
 fn process_path(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
-    // Resolve to absolute path so path_to_wide() adds \\?\ prefix for long path support.
-    // \\?\ disables all Win32 path normalization, so we must fully resolve "." and ".." first.
+    // Relative paths don't get the \\?\ prefix in path_to_wide(), hitting the 260-char MAX_PATH
+    // limit on deeply nested trees (e.g. pnpm node_modules). Resolve to absolute here.
     let canonical;
-    let path = match std::fs::canonicalize(path) {
-        Ok(abs) => {
-            canonical = abs;
+    let path = if path.is_relative() {
+        if let Ok(abs) = std::fs::canonicalize(path) {
+            let s = abs.to_string_lossy();
+            // canonicalize returns \\?\C:\... on Windows; strip it so path_to_wide() can re-add it
+            // and safety checks in safety.rs can match against plain paths like "C:\Windows".
+            canonical = match s.strip_prefix(r"\\?\") {
+                Some(stripped) => PathBuf::from(stripped),
+                None => abs,
+            };
             canonical.as_path()
+        } else {
+            path
         }
-        Err(_) => path,
+    } else {
+        path
     };
 
     let exists = rmx::winapi::path_exists(path);
