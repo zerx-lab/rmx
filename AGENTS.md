@@ -25,6 +25,7 @@ cargo clippy -- -D warnings          # Treat warnings as errors
 # Run
 cargo run -- -rf ./target            # Delete directory
 cargo run -- -n ./node_modules       # Dry run
+cargo run -- init                    # Initialize shell extension
 cargo run -- --help                  # Show help
 ```
 
@@ -41,7 +42,7 @@ rmx/
 │   ├── winapi.rs        # Windows API wrappers (POSIX delete, etc.)
 │   ├── safety.rs        # Path safety checks (system dirs, etc.)
 │   ├── error.rs         # Custom error types
-│   ├── context_menu.rs  # Windows Explorer integration (Windows only)
+│   ├── context_menu.rs  # Shell extension init/register (Windows only)
 │   └── progress_ui.rs   # GUI progress window (gpui, Windows only)
 ├── tests/
 │   ├── integration_tests.rs  # CLI integration tests

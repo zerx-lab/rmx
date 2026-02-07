@@ -27,8 +27,8 @@ const APP_VERSION: &str = env!("APP_VERSION");
   rmx -rf ./target                Force delete directory (no confirmation)\n  \
   rmx -rfv ./dist                 Force delete with verbose output\n  \
   rmx -rf dir1 dir2 dir3          Delete multiple directories\n  \
-  rmx install                     Add rmx to right-click context menu\n  \
-  rmx uninstall                   Remove rmx from right-click context menu")]
+   rmx init                        Initialize rmx shell extension (install/reinstall)\n  \
+   rmx uninstall                   Remove rmx shell extension")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -85,11 +85,9 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    #[command(about = "Add rmx to the Windows Explorer right-click context menu (requires admin)")]
-    Install,
-    #[command(
-        about = "Remove rmx from the Windows Explorer right-click context menu (requires admin)"
-    )]
+    #[command(about = "Initialize rmx shell extension - install or reinstall context menu handler")]
+    Init,
+    #[command(about = "Remove rmx shell extension and context menu handler")]
     Uninstall,
 }
 
@@ -222,10 +220,10 @@ fn run_command(command: Command) -> Result<(), std::io::Error> {
     use std::io::{Error, ErrorKind};
 
     match command {
-        Command::Install => match context_menu::install() {
+        Command::Init => match context_menu::init() {
             Ok(()) => {
-                println!("rmx has been added to the context menu.");
-                println!("Right-click on any folder to see 'Delete with rmx'.");
+                println!("rmx shell extension has been initialized.");
+                println!("Right-click on any file or folder to see 'Delete with rmx'.");
                 Ok(())
             }
             Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(Error::new(
@@ -236,7 +234,7 @@ fn run_command(command: Command) -> Result<(), std::io::Error> {
         },
         Command::Uninstall => match context_menu::uninstall() {
             Ok(()) => {
-                println!("rmx has been removed from the context menu.");
+                println!("rmx shell extension has been removed.");
                 Ok(())
             }
             Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(Error::new(
@@ -252,7 +250,7 @@ fn run_command(command: Command) -> Result<(), std::io::Error> {
 fn run_command(_command: Command) -> Result<(), std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "Context menu integration is only available on Windows",
+        "Shell extension is only available on Windows",
     ))
 }
 

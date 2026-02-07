@@ -1,96 +1,213 @@
-use std::env;
 use std::io::{self, ErrorKind};
-use win_ctx::{ActivationType, CtxEntry, EntryOptions, MenuPosition};
+use std::path::PathBuf;
 
-const ENTRY_NAME: &str = "Delete with rmx";
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::*;
+use windows::Win32::System::Registry::*;
+use windows::Win32::UI::Shell::*;
 
-pub fn install() -> io::Result<()> {
-    let exe_path = get_exe_path()?;
+/// rmx-shell.dll 编译时嵌入的字节
+const SHELL_DLL_BYTES: &[u8] = include_bytes!(env!("RMX_SHELL_DLL_PATH"));
 
-    if is_installed()? {
-        return Err(io::Error::new(
-            ErrorKind::AlreadyExists,
-            "rmx is already installed in the context menu. Use 'rmx uninstall' first to reinstall.",
-        ));
+const CLSID_STR: &str = "{8A5B2C4D-6E7F-4A8B-9C0D-1E2F3A4B5C6D}";
+const EXTENSION_NAME: &str = "RmxContextMenu";
+
+/// Initialize rmx shell extension.
+///
+/// - 如果已安装，先卸载再重新安装
+/// - 如果未安装，直接安装注册
+///
+/// 步骤:
+/// 1. 清理旧版 win_ctx 注册的右键菜单项（如果有）
+/// 2. 卸载已有的 shell extension（如果有）
+/// 3. 释放 rmx-shell.dll 到 rmx.exe 同级目录
+/// 4. 注册 COM shell extension
+pub fn init() -> io::Result<()> {
+    cleanup_legacy_entries();
+
+    if is_shell_installed() {
+        unregister_shell()?;
     }
 
-    let folder_command = format!("\"{}\" -rf --kill-processes --gui \"%V\"", exe_path);
-    let file_command = format!("\"{}\" -f --kill-processes --gui \"%V\"", exe_path);
+    let dll_path = deploy_shell_dll()?;
+    register_shell(&dll_path)?;
 
-    CtxEntry::new_with_options(
-        ENTRY_NAME,
-        &ActivationType::Folder,
-        &EntryOptions {
-            command: Some(folder_command),
-            icon: None,
-            position: Some(MenuPosition::Bottom),
-            separator: None,
-            extended: false,
-        },
-    )?;
+    Ok(())
+}
 
-    CtxEntry::new_with_options(
-        ENTRY_NAME,
-        &ActivationType::File("*".to_string()),
-        &EntryOptions {
-            command: Some(file_command),
-            icon: None,
-            position: Some(MenuPosition::Bottom),
-            separator: None,
-            extended: false,
-        },
-    )?;
+/// 检查 shell extension 是否已注册
+fn is_shell_installed() -> bool {
+    let clsid_key = format!("Software\\Classes\\CLSID\\{}", CLSID_STR);
+    let clsid_key_wide: Vec<u16> = clsid_key.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        let result = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(clsid_key_wide.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        );
+        if result == ERROR_SUCCESS {
+            let _ = RegCloseKey(hkey);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// 释放嵌入的 rmx-shell.dll 到 rmx.exe 同级目录
+fn deploy_shell_dll() -> io::Result<PathBuf> {
+    let exe_dir = std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Cannot determine exe directory"))?
+        .to_path_buf();
+
+    let dll_path = exe_dir.join("rmx-shell.dll");
+
+    std::fs::write(&dll_path, SHELL_DLL_BYTES)?;
+
+    Ok(dll_path)
+}
+
+/// 注册 shell extension COM 对象和右键菜单处理程序
+fn register_shell(dll_path: &std::path::Path) -> io::Result<()> {
+    let dll_path_str = dll_path.to_str().ok_or_else(|| {
+        io::Error::new(ErrorKind::InvalidData, "DLL path contains invalid Unicode")
+    })?;
+
+    unsafe {
+        // 1. 注册 CLSID
+        let clsid_key = format!("Software\\Classes\\CLSID\\{}", CLSID_STR);
+        let hkey = create_reg_key(&clsid_key)?;
+        set_reg_value(hkey, None, "rmx Context Menu")?;
+        let _ = RegCloseKey(hkey);
+
+        // 2. 注册 InprocServer32
+        let inproc_key = format!("{}\\InprocServer32", clsid_key);
+        let hkey = create_reg_key(&inproc_key)?;
+        set_reg_value(hkey, None, dll_path_str)?;
+        set_reg_value(hkey, Some("ThreadingModel"), "Apartment")?;
+        let _ = RegCloseKey(hkey);
+
+        // 3. 注册 Directory context menu handler
+        let dir_handler_key = format!(
+            "Software\\Classes\\Directory\\shellex\\ContextMenuHandlers\\{}",
+            EXTENSION_NAME
+        );
+        let hkey = create_reg_key(&dir_handler_key)?;
+        set_reg_value(hkey, None, CLSID_STR)?;
+        let _ = RegCloseKey(hkey);
+
+        // 4. 注册 File context menu handler
+        let file_handler_key = format!(
+            "Software\\Classes\\*\\shellex\\ContextMenuHandlers\\{}",
+            EXTENSION_NAME
+        );
+        let hkey = create_reg_key(&file_handler_key)?;
+        set_reg_value(hkey, None, CLSID_STR)?;
+        let _ = RegCloseKey(hkey);
+
+        // 通知 Explorer 刷新
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+    }
 
     Ok(())
 }
 
 pub fn uninstall() -> io::Result<()> {
-    if !is_installed()? {
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            "rmx is not installed in the context menu.",
+    cleanup_legacy_entries();
+    unregister_shell()?;
+    Ok(())
+}
+
+fn unregister_shell() -> io::Result<()> {
+    unsafe {
+        delete_reg_tree(&format!(
+            "Software\\Classes\\Directory\\shellex\\ContextMenuHandlers\\{}",
+            EXTENSION_NAME
         ));
-    }
+        delete_reg_tree(&format!(
+            "Software\\Classes\\*\\shellex\\ContextMenuHandlers\\{}",
+            EXTENSION_NAME
+        ));
+        delete_reg_tree(&format!(
+            "Software\\Classes\\CLSID\\{}\\InprocServer32",
+            CLSID_STR
+        ));
+        delete_reg_tree(&format!("Software\\Classes\\CLSID\\{}", CLSID_STR));
 
-    if let Some(entry) = CtxEntry::get(&[ENTRY_NAME], &ActivationType::Folder) {
-        entry.delete()?;
-    }
-
-    if let Some(entry) = CtxEntry::get(&[ENTRY_NAME], &ActivationType::File("*".to_string())) {
-        entry.delete()?;
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
     }
 
     Ok(())
 }
 
-pub fn is_installed() -> io::Result<bool> {
-    let folder_installed = CtxEntry::get(&[ENTRY_NAME], &ActivationType::Folder).is_some();
-    let file_installed =
-        CtxEntry::get(&[ENTRY_NAME], &ActivationType::File("*".to_string())).is_some();
-    Ok(folder_installed || file_installed)
+/// 清理旧版 win_ctx 方式注册的右键菜单项
+fn cleanup_legacy_entries() {
+    // win_ctx 在这些位置注册 "Delete with rmx" 项
+    delete_reg_tree("Software\\Classes\\Directory\\shell\\Delete with rmx");
+    delete_reg_tree("Software\\Classes\\*\\shell\\Delete with rmx");
 }
 
-fn get_exe_path() -> io::Result<String> {
-    env::current_exe()?
-        .to_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::InvalidData,
-                "Executable path contains invalid Unicode characters",
-            )
-        })
+// ── Registry helpers ──────────────────────────────────────────────────────
+
+unsafe fn create_reg_key(subkey: &str) -> io::Result<HKEY> {
+    let subkey_wide: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hkey = HKEY::default();
+
+    let result = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        PCWSTR(subkey_wide.as_ptr()),
+        0,
+        PCWSTR::null(),
+        REG_OPTION_NON_VOLATILE,
+        KEY_WRITE,
+        None,
+        &mut hkey,
+        None,
+    );
+
+    if result != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    Ok(hkey)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+unsafe fn set_reg_value(hkey: HKEY, name: Option<&str>, value: &str) -> io::Result<()> {
+    let name_wide: Option<Vec<u16>> =
+        name.map(|n| n.encode_utf16().chain(std::iter::once(0)).collect());
+    let value_wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
 
-    #[test]
-    fn test_get_exe_path() {
-        let path = get_exe_path();
-        assert!(path.is_ok());
-        let path = path.unwrap();
-        assert!(path.ends_with(".exe"));
+    let name_ptr = match &name_wide {
+        Some(v) => PCWSTR(v.as_ptr()),
+        None => PCWSTR::null(),
+    };
+
+    let result = RegSetValueExW(
+        hkey,
+        name_ptr,
+        0,
+        REG_SZ,
+        Some(std::slice::from_raw_parts(
+            value_wide.as_ptr() as *const u8,
+            value_wide.len() * 2,
+        )),
+    );
+
+    if result != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(result.0 as i32));
+    }
+
+    Ok(())
+}
+
+fn delete_reg_tree(subkey: &str) {
+    let subkey_wide: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(subkey_wide.as_ptr()));
     }
 }

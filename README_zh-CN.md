@@ -88,21 +88,18 @@ rmx --force ./path
 rmx -rf --kill-processes ./locked_directory
 ```
 
-### 右键菜单集成
+### Shell 扩展
 
-将 rmx 添加到 Windows 资源管理器右键菜单：
+初始化 rmx shell 扩展，集成到 Windows 资源管理器右键菜单：
 
 ```powershell
-# 添加到右键菜单（需要管理员权限）
-rmx install
-
-# 从右键菜单移除（需要管理员权限）
-rmx uninstall
+# 初始化 shell 扩展（安装或重新安装）
+rmx init
 ```
 
-安装后，右键点击任意文件夹即可看到"Delete with rmx"选项。
+初始化后，右键点击任意文件或文件夹即可看到"Delete with rmx"选项。
 
-**注意：** 运行 install/uninstall 命令需要以管理员身份运行 PowerShell 或 CMD。
+**注意：** 运行 init 命令需要以管理员身份运行 PowerShell 或 CMD。
 
 ## ⚙️ 命令选项
 

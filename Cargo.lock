@@ -4575,7 +4575,6 @@ dependencies = [
  "gpui-component-assets",
  "parking_lot",
  "rayon",
- "win-ctx",
  "windows 0.58.0",
 ]
 
@@ -6426,15 +6425,6 @@ dependencies = [
  "home",
  "rustix 0.38.44",
  "winsafe",
-]
-
-[[package]]
-name = "win-ctx"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a996721161911db03f4da56a903dc922233ab1c0d4386bf569d3e0dbc903041d"
-dependencies = [
- "winreg",
 ]
 
 [[package]]
