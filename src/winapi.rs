@@ -214,10 +214,11 @@ pub fn remove_dir(path: &Path) -> io::Result<()> {
 
     if let Some(ref e) = last_error {
         if is_dir_not_empty_error(e) {
-            for round in 0..DIR_NOT_EMPTY_CLEANUP_ROUNDS {
-                thread::sleep(Duration::from_millis(
-                    DIR_NOT_EMPTY_CLEANUP_DELAYS_MS[round],
-                ));
+            for &delay in DIR_NOT_EMPTY_CLEANUP_DELAYS_MS
+                .iter()
+                .take(DIR_NOT_EMPTY_CLEANUP_ROUNDS)
+            {
+                thread::sleep(Duration::from_millis(delay));
 
                 cleanup_remaining_entries(path);
 

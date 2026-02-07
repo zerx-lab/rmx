@@ -295,6 +295,17 @@ fn print_summary(stats: &DeletionStats, args: &Args) {
 }
 
 fn process_path(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
+    // Resolve to absolute path so path_to_wide() adds \\?\ prefix for long path support.
+    // \\?\ disables all Win32 path normalization, so we must fully resolve "." and ".." first.
+    let canonical;
+    let path = match std::fs::canonicalize(path) {
+        Ok(abs) => {
+            canonical = abs;
+            canonical.as_path()
+        }
+        Err(_) => path,
+    };
+
     let exists = rmx::winapi::path_exists(path);
     let is_dir = rmx::winapi::is_directory(path);
 
