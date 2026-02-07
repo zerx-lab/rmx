@@ -8,6 +8,9 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::System::Registry::HKEY;
+use windows::Win32::System::Threading::{
+    CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -122,21 +125,40 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
 
         for path in paths.iter() {
             let path_str = path.to_string_lossy();
-            let flag = if path.is_dir() { "-rf" } else { "-f" };
-            let args = format!("{} --gui \"{}\"", flag, path_str);
+            let flag = if path.is_dir() { "-r" } else { "" };
+            let cmdline = if flag.is_empty() {
+                format!("\"{}\" --gui \"{}\"", exe_path, path_str)
+            } else {
+                format!("\"{}\" {} --gui \"{}\"", exe_path, flag, path_str)
+            };
 
-            let exe_wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
-            let args_wide: Vec<u16> = args.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut cmdline_wide: Vec<u16> =
+                cmdline.encode_utf16().chain(std::iter::once(0)).collect();
 
             unsafe {
-                ShellExecuteW(
-                    HWND::default(),
-                    w!("open"),
-                    PCWSTR(exe_wide.as_ptr()),
-                    PCWSTR(args_wide.as_ptr()),
+                let mut si: STARTUPINFOW = std::mem::zeroed();
+                si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+                let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+
+                let _ = CreateProcessW(
                     PCWSTR::null(),
-                    SW_SHOWNORMAL,
+                    PWSTR(cmdline_wide.as_mut_ptr()),
+                    None,
+                    None,
+                    false,
+                    DETACHED_PROCESS,
+                    None,
+                    PCWSTR::null(),
+                    &si,
+                    &mut pi,
                 );
+
+                if !pi.hProcess.is_invalid() {
+                    let _ = windows::Win32::Foundation::CloseHandle(pi.hProcess);
+                }
+                if !pi.hThread.is_invalid() {
+                    let _ = windows::Win32::Foundation::CloseHandle(pi.hThread);
+                }
             }
         }
 

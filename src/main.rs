@@ -1,7 +1,3 @@
-// Hide console window when launched from GUI (e.g., context menu)
-// CLI usage will attach to parent console via AttachConsole
-#![windows_subsystem = "windows"]
-
 use clap::{Parser, Subcommand};
 use rmx::{broker::Broker, error::Error, safety, tree, worker};
 use std::io::Write;
@@ -85,114 +81,23 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    #[command(about = "Initialize rmx shell extension - install or reinstall context menu handler")]
+    #[command(
+        about = "Initialize rmx shell extension - install or reinstall context menu handler"
+    )]
     Init,
     #[command(about = "Remove rmx shell extension and context menu handler")]
     Uninstall,
 }
 
-/// Setup console I/O for Windows GUI subsystem application.
-///
-/// This handles three scenarios:
-/// 1. Launched from terminal (cmd/powershell): attach to parent console, output visible
-/// 2. Launched from terminal with redirection (e.g., `rmx --help > out.txt`): use existing pipe/file handles
-/// 3. Launched from GUI (e.g., Explorer right-click): no console, no popup window
-#[cfg(windows)]
-unsafe fn setup_console() {
-    use std::os::raw::{c_char, c_int, c_void};
-    use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileType, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
-    };
-    use windows::Win32::System::Console::{
-        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
-        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-    };
-
-    const STDIN_FILENO: c_int = 0;
-    const STDOUT_FILENO: c_int = 1;
-    const STDERR_FILENO: c_int = 2;
-
-    extern "C" {
-        fn freopen(
-            filename: *const c_char,
-            mode: *const c_char,
-            stream: *mut c_void,
-        ) -> *mut c_void;
-        fn __acrt_iob_func(index: c_int) -> *mut c_void;
-    }
-
-    // Check if stdout is already valid (redirected to pipe/file)
-    // For GUI subsystem apps, handles are typically NULL unless redirected
-    let stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or(INVALID_HANDLE_VALUE);
-    let stdout_valid = !stdout_handle.is_invalid()
-        && !stdout_handle.0.is_null()
-        && GetFileType(stdout_handle).0 != 0;
-
-    if stdout_valid {
-        // stdout already has a valid handle (pipe/file redirection)
-        // Don't attach to console, just use existing handles
-        return;
-    }
-
-    // No valid stdout - try to attach to parent console (terminal scenario)
-    if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
-        // No parent console (launched from GUI) - stay silent, no popup
-        return;
-    }
-
-    // Successfully attached to parent console
-    // Now setup both Windows handles (for Rust std::io) and C stdio
-
-    // Open CONOUT$ and CONIN$ for Windows handles
-    let conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
-    let conin: Vec<u16> = "CONIN$\0".encode_utf16().collect();
-
-    // Setup stdout/stderr with CONOUT$
-    if let Ok(h) = CreateFileW(
-        windows::core::PCWSTR(conout.as_ptr()),
-        FILE_GENERIC_WRITE.0,
-        FILE_SHARE_WRITE,
-        None,
-        OPEN_EXISTING,
-        Default::default(),
-        None,
-    ) {
-        let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
-        let _ = SetStdHandle(STD_ERROR_HANDLE, h);
-    }
-
-    // Setup stdin with CONIN$
-    if let Ok(h) = CreateFileW(
-        windows::core::PCWSTR(conin.as_ptr()),
-        FILE_GENERIC_READ.0,
-        FILE_SHARE_READ,
-        None,
-        OPEN_EXISTING,
-        Default::default(),
-        None,
-    ) {
-        let _ = SetStdHandle(STD_INPUT_HANDLE, h);
-    }
-
-    // Also setup C stdio (for any C library code that might use printf, etc.)
-    let conout_c = c"CONOUT$".as_ptr();
-    let conin_c = c"CONIN$".as_ptr();
-    let w = c"w".as_ptr();
-    let r = c"r".as_ptr();
-    freopen(conin_c, r, __acrt_iob_func(STDIN_FILENO));
-    freopen(conout_c, w, __acrt_iob_func(STDOUT_FILENO));
-    freopen(conout_c, w, __acrt_iob_func(STDERR_FILENO));
-}
-
 fn main() {
-    #[cfg(windows)]
-    unsafe {
-        setup_console();
-    }
-
     let args = Args::parse();
+
+    #[cfg(windows)]
+    if args.gui {
+        unsafe {
+            let _ = windows::Win32::System::Console::FreeConsole();
+        }
+    }
 
     if let Some(command) = args.command {
         if let Err(e) = run_command(command) {
@@ -374,8 +279,23 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         });
     }
 
-    if !args.force && !confirm_deletion(path, false)? {
-        return Ok(DeletionStats::default());
+    if !args.force {
+        #[cfg(windows)]
+        if args.gui {
+            let confirmed =
+                progress_ui::run_confirmation_dialog(path.to_path_buf(), 1, 0).unwrap_or(false);
+
+            if !confirmed {
+                return Ok(DeletionStats::default());
+            }
+        } else if !confirm_deletion(path, false)? {
+            return Ok(DeletionStats::default());
+        }
+
+        #[cfg(not(windows))]
+        if !confirm_deletion(path, false)? {
+            return Ok(DeletionStats::default());
+        }
     }
 
     let start = Instant::now();
@@ -487,16 +407,42 @@ fn process_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         let dir_count = tree.dirs.len();
         let file_count = tree.file_count;
 
-        eprint!(
-            "rmx: descend into directory '{}' ({} files, {} directories)? [y/N] ",
-            path.display(),
-            file_count,
-            dir_count
-        );
-        std::io::stderr().flush().ok();
+        #[cfg(windows)]
+        if args.gui {
+            let confirmed =
+                progress_ui::run_confirmation_dialog(path.to_path_buf(), file_count, dir_count)
+                    .unwrap_or(false);
 
-        if !confirm_yes()? {
-            return Ok(DeletionStats::default());
+            if !confirmed {
+                return Ok(DeletionStats::default());
+            }
+        } else {
+            eprint!(
+                "rmx: descend into directory '{}' ({} files, {} directories)? [y/N] ",
+                path.display(),
+                file_count,
+                dir_count
+            );
+            std::io::stderr().flush().ok();
+
+            if !confirm_yes()? {
+                return Ok(DeletionStats::default());
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            eprint!(
+                "rmx: descend into directory '{}' ({} files, {} directories)? [y/N] ",
+                path.display(),
+                file_count,
+                dir_count
+            );
+            std::io::stderr().flush().ok();
+
+            if !confirm_yes()? {
+                return Ok(DeletionStats::default());
+            }
         }
     }
 
@@ -672,7 +618,9 @@ fn delete_directory_internal(
 
             if completed >= total
                 || progress.is_cancelled()
-                || progress.is_complete.load(std::sync::atomic::Ordering::Acquire)
+                || progress
+                    .is_complete
+                    .load(std::sync::atomic::Ordering::Acquire)
             {
                 let final_completed = broker_clone.completed_count();
                 progress
@@ -697,8 +645,10 @@ fn delete_directory_internal(
 
     #[cfg(windows)]
     if let Some(ref p) = progress {
-        p.deleted_dirs
-            .store(broker.completed_count(), std::sync::atomic::Ordering::Relaxed);
+        p.deleted_dirs.store(
+            broker.completed_count(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if !failures.is_empty() {
             let error_messages: Vec<String> = failures
                 .iter()

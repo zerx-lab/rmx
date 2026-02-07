@@ -6,6 +6,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Shell::*;
 
+use crate::winapi;
+
 /// rmx-shell.dll 编译时嵌入的字节
 const SHELL_DLL_BYTES: &[u8] = include_bytes!(env!("RMX_SHELL_DLL_PATH"));
 
@@ -59,15 +61,35 @@ fn is_shell_installed() -> bool {
 }
 
 /// 释放嵌入的 rmx-shell.dll 到 rmx.exe 同级目录
+///
+/// 如果 DLL 被 Explorer 占用（已加载的 COM shell extension），
+/// 会强制关闭文件句柄后重试写入。
 fn deploy_shell_dll() -> io::Result<PathBuf> {
-    let exe_dir = std::env::current_exe()?
-        .parent()
-        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Cannot determine exe directory"))?
-        .to_path_buf();
+    let dll_path = get_shell_dll_path()?;
 
-    let dll_path = exe_dir.join("rmx-shell.dll");
+    match std::fs::write(&dll_path, SHELL_DLL_BYTES) {
+        Ok(()) => return Ok(dll_path),
+        Err(e) if e.raw_os_error() == Some(32) => {
+            let _ = winapi::force_close_file_handles(&[dll_path.clone()], false);
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
-    std::fs::write(&dll_path, SHELL_DLL_BYTES)?;
+            if let Err(e2) = std::fs::write(&dll_path, SHELL_DLL_BYTES) {
+                if e2.raw_os_error() == Some(32) {
+                    let hint = locking_processes_hint(&dll_path);
+                    return Err(io::Error::new(
+                        ErrorKind::Other,
+                        format!(
+                            "rmx-shell.dll 被占用，无法写入。{}\n\
+                             请关闭占用进程或重启 Explorer 后重试。",
+                            hint
+                        ),
+                    ));
+                }
+                return Err(e2);
+            }
+        }
+        Err(e) => return Err(e),
+    }
 
     Ok(dll_path)
 }
@@ -120,6 +142,37 @@ fn register_shell(dll_path: &std::path::Path) -> io::Result<()> {
 pub fn uninstall() -> io::Result<()> {
     cleanup_legacy_entries();
     unregister_shell()?;
+
+    let dll_path = get_shell_dll_path()?;
+    if dll_path.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        if let Err(e) = std::fs::remove_file(&dll_path) {
+            if e.raw_os_error() == Some(32) {
+                let _ = winapi::force_close_file_handles(&[dll_path.clone()], false);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+
+                if let Err(e2) = std::fs::remove_file(&dll_path) {
+                    if e2.raw_os_error() == Some(32) {
+                        let hint = locking_processes_hint(&dll_path);
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            format!(
+                                "无法删除 rmx-shell.dll，文件被占用。{}\n\
+                                 注册表已清理，重启 Explorer 或重新登录后可手动删除: {}",
+                                hint,
+                                dll_path.display()
+                            ),
+                        ));
+                    }
+                    return Err(e2);
+                }
+            } else {
+                return Err(e);
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -150,6 +203,27 @@ fn cleanup_legacy_entries() {
     // win_ctx 在这些位置注册 "Delete with rmx" 项
     delete_reg_tree("Software\\Classes\\Directory\\shell\\Delete with rmx");
     delete_reg_tree("Software\\Classes\\*\\shell\\Delete with rmx");
+}
+
+fn get_shell_dll_path() -> io::Result<PathBuf> {
+    let exe_dir = std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Cannot determine exe directory"))?
+        .to_path_buf();
+    Ok(exe_dir.join("rmx-shell.dll"))
+}
+
+fn locking_processes_hint(path: &PathBuf) -> String {
+    match winapi::find_locking_processes(path) {
+        Ok(procs) if !procs.is_empty() => {
+            let list: Vec<String> = procs
+                .iter()
+                .map(|p| format!("{} (PID {})", p.name, p.pid))
+                .collect();
+            format!("\n占用进程: {}", list.join(", "))
+        }
+        _ => String::new(),
+    }
 }
 
 // ── Registry helpers ──────────────────────────────────────────────────────

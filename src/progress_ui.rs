@@ -299,6 +299,248 @@ pub fn should_show_progress_ui(total_items: usize) -> bool {
     total_items > FAST_DELETE_THRESHOLD
 }
 
+pub struct ConfirmState {
+    pub confirmed: AtomicBool,
+    pub cancelled: AtomicBool,
+}
+
+impl Default for ConfirmState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConfirmState {
+    pub fn new() -> Self {
+        Self {
+            confirmed: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    pub fn confirm(&self) {
+        self.confirmed.store(true, Ordering::Release);
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_confirmed(&self) -> bool {
+        self.confirmed.load(Ordering::Acquire)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+pub struct ConfirmDeleteWindow {
+    path: PathBuf,
+    total_files: usize,
+    total_dirs: usize,
+    state: Arc<ConfirmState>,
+}
+
+impl ConfirmDeleteWindow {
+    pub fn new(path: PathBuf, total_files: usize, total_dirs: usize, state: Arc<ConfirmState>) -> Self {
+        Self {
+            path,
+            total_files,
+            total_dirs,
+            state,
+        }
+    }
+
+    fn format_path_display(&self) -> String {
+        let path_str = self.path.display().to_string();
+        if path_str.len() > 80 {
+            format!("...{}", &path_str[path_str.len() - 77..])
+        } else {
+            path_str
+        }
+    }
+
+    fn format_item_count(&self) -> String {
+        if self.total_dirs == 0 && self.total_files <= 1 {
+            return "1 个文件".to_string();
+        }
+        let total = self.total_files + self.total_dirs;
+        format!(
+            "{} 个文件, {} 个目录 (共 {} 项)",
+            self.total_files, self.total_dirs, total
+        )
+    }
+}
+
+impl Render for ConfirmDeleteWindow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        let state_cancel = self.state.clone();
+        let path_display = self.format_path_display();
+        let item_count = self.format_item_count();
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .h_full()
+            .p_6()
+            .gap_4()
+            .bg(rgb(0xf5f5f5))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x333333))
+                            .child("确认删除"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x666666))
+                            .child("以下内容将被永久删除，无法恢复"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(6.0))
+                    .bg(rgb(0xfff3cd))
+                    .border_l(px(3.0))
+                    .border_color(rgb(0xffe69c))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x856404))
+                            .child("⚠ 警告"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x856404))
+                            .child("此操作无法撤销。已删除的文件将直接从磁盘移除，不会进入回收站。"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded(px(6.0))
+                    .bg(rgb(0xf0f0f0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x666666))
+                            .child("路径："),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x333333))
+                            .overflow_hidden()
+                            .child(path_display),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x666666))
+                            .mt_2()
+                            .child(item_count),
+                    ),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .h_10()
+                    .items_center()
+                    .child(
+                        Button::new("cancel-btn")
+                            .label("取消")
+                            .on_click(move |_, _, cx| {
+                                state_cancel.cancel();
+                                cx.quit();
+                            }),
+                    )
+                    .child(
+                        Button::new("confirm-btn")
+                            .primary()
+                            .label("确认删除")
+                            .on_click(move |_, _, cx| {
+                                state.confirm();
+                                cx.quit();
+                            }),
+                    ),
+            )
+    }
+}
+
+/// 显示删除确认对话框，返回用户选择
+/// 
+/// # Returns
+/// - `Ok(true)` if user confirmed deletion
+/// - `Ok(false)` if user cancelled
+/// - `Err` if dialog failed to launch
+pub fn run_confirmation_dialog(
+    path: PathBuf,
+    total_files: usize,
+    total_dirs: usize,
+) -> anyhow::Result<bool> {
+    let state = Arc::new(ConfirmState::new());
+    let state_clone = state.clone();
+
+    let app = Application::new().with_assets(Assets);
+
+    app.run(move |cx| {
+        gpui_component::init(cx);
+
+        let state_inner = state_clone.clone();
+        let path_clone = path.clone();
+        let window_bounds = Bounds::centered(None, size(px(500.0), px(400.0)), cx);
+
+        cx.spawn(async move |cx| {
+            let window_options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("确认删除".into()),
+                    ..Default::default()
+                }),
+                window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+                kind: WindowKind::PopUp,
+                is_movable: true,
+                ..Default::default()
+            };
+
+            cx.open_window(window_options, |window, cx| {
+                let view = cx.new(|_| {
+                    ConfirmDeleteWindow::new(path_clone, total_files, total_dirs, state_inner)
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            })?;
+
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    });
+
+    Ok(state.is_confirmed())
+}
+
 pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyhow::Result<()> {
     let app = Application::new().with_assets(Assets);
 
