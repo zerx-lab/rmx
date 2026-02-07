@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
@@ -24,7 +25,7 @@ pub struct DeleteProgress {
     pub is_cancelled: AtomicBool,
     pub start_time: Instant,
     pub error_count: AtomicUsize,
-    pub last_error: parking_lot::Mutex<Option<String>>,
+    pub errors: parking_lot::Mutex<Vec<String>>,
 }
 
 impl DeleteProgress {
@@ -38,7 +39,7 @@ impl DeleteProgress {
             is_cancelled: AtomicBool::new(false),
             start_time: Instant::now(),
             error_count: AtomicUsize::new(0),
-            last_error: parking_lot::Mutex::new(None),
+            errors: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -73,9 +74,9 @@ impl DeleteProgress {
         self.is_cancelled.load(Ordering::Acquire)
     }
 
-    pub fn set_error(&self, count: usize, message: Option<String>) {
-        self.error_count.store(count, Ordering::Release);
-        *self.last_error.lock() = message;
+    pub fn set_errors(&self, errors: Vec<String>) {
+        self.error_count.store(errors.len(), Ordering::Release);
+        *self.errors.lock() = errors;
     }
 
     pub fn has_errors(&self) -> bool {
@@ -86,8 +87,12 @@ impl DeleteProgress {
         self.error_count.load(Ordering::Acquire)
     }
 
-    pub fn get_last_error(&self) -> Option<String> {
-        self.last_error.lock().clone()
+    pub fn get_errors(&self) -> Vec<String> {
+        self.errors.lock().clone()
+    }
+
+    pub fn get_first_error(&self) -> Option<String> {
+        self.errors.lock().first().cloned()
     }
 }
 
@@ -234,7 +239,7 @@ impl Render for DeleteProgressWindow {
             );
 
         if is_complete && has_errors {
-            if let Some(error_msg) = self.progress.get_last_error() {
+            if let Some(error_msg) = self.progress.get_first_error() {
                 let display_error = if error_msg.len() > 80 {
                     format!("{}...", &error_msg[..77])
                 } else {
@@ -252,12 +257,25 @@ impl Render for DeleteProgressWindow {
             }
         }
 
+        let errors_for_copy = self.progress.get_errors();
+
         container.child(
             div()
                 .flex()
                 .flex_row()
                 .justify_end()
+                .gap_2()
                 .mt_2()
+                .when(is_complete && has_errors, |this| {
+                    this.child(
+                        Button::new("copy-errors")
+                            .label("Copy Errors")
+                            .on_click(move |_, _, cx| {
+                                let text = errors_for_copy.join("\n");
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            }),
+                    )
+                })
                 .child(if is_complete {
                     Button::new("close")
                         .primary()
@@ -289,7 +307,7 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
 
         let progress_clone = progress.clone();
         let path_clone = path.clone();
-        let window_bounds = Bounds::centered(None, size(px(400.0), px(200.0)), cx);
+        let window_bounds = Bounds::centered(None, size(px(400.0), px(240.0)), cx);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {

@@ -258,7 +258,9 @@ unsafe fn posix_delete_dir(wide_path: &[u16]) -> io::Result<()> {
 
     let mut info = FILE_DISPOSITION_INFORMATION_EX {
         Flags: FILE_DISPOSITION_INFORMATION_EX_FLAGS(
-            FILE_DISPOSITION_DELETE.0 | FILE_DISPOSITION_POSIX_SEMANTICS.0,
+            FILE_DISPOSITION_DELETE.0
+                | FILE_DISPOSITION_POSIX_SEMANTICS.0
+                | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE.0,
         ),
     };
 
@@ -739,7 +741,7 @@ struct SystemHandleInformation {
 struct SystemHandleTableEntryInfo {
     unique_process_id: u16,
     _creator_back_trace_index: u16,
-    _object_type_index: u8,
+    object_type_index: u8,
     _handle_attributes: u8,
     handle_value: u16,
     _object: usize,
@@ -772,6 +774,8 @@ pub fn force_close_file_handles(paths: &[PathBuf], verbose: bool) -> io::Result<
         return Ok(0);
     }
 
+    let file_type_index = detect_file_object_type_index();
+
     let buf = query_system_handles()?;
     let info = buf.as_ptr() as *const SystemHandleInformation;
     let num_handles = unsafe { (*info).number_of_handles as usize };
@@ -795,6 +799,12 @@ pub fn force_close_file_handles(paths: &[PathBuf], verbose: bool) -> io::Result<
         let pid = entry.unique_process_id;
         if pid == current_pid || pid == 0 || pid == 4 || entry.granted_access == 0 {
             continue;
+        }
+
+        if let Some(file_idx) = file_type_index {
+            if entry.object_type_index != file_idx {
+                continue;
+            }
         }
 
         let proc_handle = proc_cache
@@ -825,7 +835,7 @@ pub fn force_close_file_handles(paths: &[PathBuf], verbose: bool) -> io::Result<
             continue;
         }
 
-        let is_match = resolve_handle_path(dup_handle)
+        let is_match = resolve_handle_path_with_timeout(dup_handle)
             .map(|p| normalized_targets.contains(&p.to_lowercase()))
             .unwrap_or(false);
 
@@ -870,14 +880,63 @@ pub fn force_close_file_handles(paths: &[PathBuf], verbose: bool) -> io::Result<
     Ok(handles_closed)
 }
 
+const RESOLVE_TIMEOUT: Duration = Duration::from_millis(200);
+
 #[cfg(windows)]
-fn resolve_handle_path(handle: HANDLE) -> Option<String> {
-    let mut buf = [0u16; 1024];
-    let len = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) };
-    if len == 0 || len as usize >= buf.len() {
-        return None;
+fn resolve_handle_path_with_timeout(handle: HANDLE) -> Option<String> {
+    let handle_val = handle.0 as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    thread::spawn(move || {
+        let h = HANDLE(handle_val as *mut c_void);
+        let mut buf = [0u16; 1024];
+        let len = unsafe { GetFinalPathNameByHandleW(h, &mut buf, FILE_NAME_NORMALIZED) };
+        if len > 0 && (len as usize) < buf.len() {
+            let _ = tx.send(Some(String::from_utf16_lossy(&buf[..len as usize])));
+        } else {
+            let _ = tx.send(None);
+        }
+    });
+
+    rx.recv_timeout(RESOLVE_TIMEOUT).ok().flatten()
+}
+
+/// 运行时检测 File 对象的 object_type_index（不同 Windows 版本值不同）。
+/// 通过打开 NUL 设备获取一个已知的 File 句柄，然后在系统句柄表中找到它的 type index。
+#[cfg(windows)]
+fn detect_file_object_type_index() -> Option<u8> {
+    let nul_path = path_to_wide(Path::new("NUL"));
+    let nul_handle = unsafe {
+        CreateFileW(
+            PCWSTR(nul_path.as_ptr()),
+            DELETE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            HANDLE::default(),
+        )
     }
-    Some(String::from_utf16_lossy(&buf[..len as usize]))
+    .ok()?;
+
+    let current_pid = std::process::id() as u16;
+    let nul_handle_value = nul_handle.0 as u16;
+
+    let buf = query_system_handles().ok()?;
+    let info = buf.as_ptr() as *const SystemHandleInformation;
+    let num_handles = unsafe { (*info).number_of_handles as usize };
+    let entries = unsafe { std::slice::from_raw_parts((*info).handles.as_ptr(), num_handles) };
+
+    let mut result = None;
+    for entry in entries {
+        if entry.unique_process_id == current_pid && entry.handle_value == nul_handle_value {
+            result = Some(entry.object_type_index);
+            break;
+        }
+    }
+
+    unsafe { CloseHandle(nul_handle).ok() };
+    result
 }
 
 #[cfg(windows)]

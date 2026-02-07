@@ -128,9 +128,9 @@ fn scan_parallel(
         return;
     }
 
-    // Register symlink directories as leaf directories (no children, deleted with remove_dir)
-    for symlink_dir in symlink_dirs {
-        all_dirs.insert(symlink_dir);
+    // Register symlink directories as leaf directories (no recursion into them)
+    for symlink_dir in &symlink_dirs {
+        all_dirs.insert(symlink_dir.clone());
     }
 
     let local_file_count = files.len();
@@ -143,9 +143,19 @@ fn scan_parallel(
         total_bytes.fetch_add(local_bytes, Ordering::Relaxed);
     }
 
-    if !child_dirs.is_empty() {
-        children_map.insert(dir.to_path_buf(), child_dirs.clone());
+    // Include symlink dirs in children so parent waits for them before removal
+    let all_children: Vec<PathBuf> = child_dirs
+        .iter()
+        .chain(symlink_dirs.iter())
+        .cloned()
+        .collect();
 
+    if !all_children.is_empty() {
+        children_map.insert(dir.to_path_buf(), all_children);
+    }
+
+    // Only recurse into non-symlink child directories
+    if !child_dirs.is_empty() {
         if child_dirs.len() >= scan_parallel_threshold() {
             child_dirs.par_iter().for_each(|child| {
                 scan_parallel(

@@ -97,13 +97,13 @@ fn worker_thread(
             }
 
             if config.kill_processes && is_file_in_use_error(&e) {
-                let _ = force_close_file_handles(std::slice::from_ref(&dir), config.verbose);
+                let _ = kill_locking_processes(&dir, config.verbose);
                 if let Ok(()) = remove_dir(&dir) {
                     broker.mark_complete(dir);
                     continue;
                 }
 
-                let _ = kill_locking_processes(&dir, config.verbose);
+                let _ = force_close_file_handles(std::slice::from_ref(&dir), config.verbose);
                 match remove_dir(&dir) {
                     Ok(()) => {
                         broker.mark_complete(dir);
@@ -250,7 +250,7 @@ fn handle_locked_files(
 
     let paths: Vec<PathBuf> = locked_files.iter().map(|(p, _)| p.clone()).collect();
 
-    let _ = force_close_file_handles(&paths, config.verbose);
+    let _ = kill_locking_processes_batch(&paths, config.verbose);
 
     let mut still_locked = Vec::new();
     for path in &paths {
@@ -270,7 +270,7 @@ fn handle_locked_files(
         return;
     }
 
-    let _ = kill_locking_processes_batch(&still_locked, config.verbose);
+    let _ = force_close_file_handles(&still_locked, config.verbose);
 
     for path in &still_locked {
         if let Err(e) = delete_file(path) {

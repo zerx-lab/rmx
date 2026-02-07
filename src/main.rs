@@ -385,10 +385,12 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     match rmx::winapi::delete_file(path) {
         Ok(()) => {}
         Err(e) if args.kill_processes && rmx::winapi::is_file_in_use_error(&e) => {
-            let paths = [path.to_path_buf()];
-            let _ = rmx::winapi::force_close_file_handles(&paths, args.verbose);
+            // Step 1: Restart Manager — 精准找到并杀掉占用进程（快速可靠）
+            let _ = rmx::winapi::kill_locking_processes(path, args.verbose);
             if rmx::winapi::delete_file(path).is_err() {
-                let _ = rmx::winapi::kill_locking_processes(path, args.verbose);
+                // Step 2: 暴力句柄扫描兜底（慢，但能处理 RM 找不到的情况）
+                let paths = [path.to_path_buf()];
+                let _ = rmx::winapi::force_close_file_handles(&paths, args.verbose);
                 rmx::winapi::delete_file(path)
                     .map_err(|e2| Error::io_with_path(path.to_path_buf(), e2))?;
             }
@@ -566,16 +568,17 @@ fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, 
 
         match &result {
             Ok(_) => {
-                progress_clone.set_error(0, None);
+                progress_clone.set_errors(Vec::new());
             }
-            Err(Error::PartialFailure { failed, errors, .. }) => {
-                let first_error = errors
-                    .first()
-                    .map(|e| format!("{}: {}", e.path.display(), e.error));
-                progress_clone.set_error(*failed, first_error);
+            Err(Error::PartialFailure { errors, .. }) => {
+                let error_messages: Vec<String> = errors
+                    .iter()
+                    .map(|e| format!("{}: {}", e.path.display(), e.error))
+                    .collect();
+                progress_clone.set_errors(error_messages);
             }
             Err(e) => {
-                progress_clone.set_error(1, Some(e.to_string()));
+                progress_clone.set_errors(vec![e.to_string()]);
             }
         }
 
@@ -588,7 +591,7 @@ fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, 
     match delete_handle.join() {
         Ok(result) => result,
         Err(_) => {
-            progress.set_error(1, Some("Delete thread panicked".to_string()));
+            progress.set_errors(vec!["Delete thread panicked".to_string()]);
             progress.mark_complete();
             Err(Error::InvalidPath {
                 path: path.to_path_buf(),
@@ -699,10 +702,11 @@ fn delete_directory_internal(
         p.deleted_dirs
             .store(broker.completed_count(), std::sync::atomic::Ordering::Relaxed);
         if !failures.is_empty() {
-            let first_error = failures
-                .first()
-                .map(|e| format!("{}: {}", e.path.display(), e.error));
-            p.set_error(failures.len(), first_error);
+            let error_messages: Vec<String> = failures
+                .iter()
+                .map(|e| format!("{}: {}", e.path.display(), e.error))
+                .collect();
+            p.set_errors(error_messages);
         }
         p.mark_complete();
     }
