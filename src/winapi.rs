@@ -46,6 +46,12 @@ use windows::Win32::System::Threading::{
 const MAX_RETRIES: u32 = 4;
 const RETRY_DELAYS_MS: [u64; 4] = [0, 1, 5, 10];
 
+/// POSIX delete on hardlinked files (pnpm node_modules) can return Ok() while
+/// NTFS directory entry removal is still pending. Passive retry isn't enough —
+/// we must actively re-enumerate and re-delete remaining entries.
+const DIR_NOT_EMPTY_CLEANUP_ROUNDS: usize = 5;
+const DIR_NOT_EMPTY_CLEANUP_DELAYS_MS: [u64; 5] = [1, 10, 50, 100, 200];
+
 #[cfg(windows)]
 pub fn path_exists(path: &Path) -> bool {
     let wide_path = path_to_wide(path);
@@ -206,7 +212,45 @@ pub fn remove_dir(path: &Path) -> io::Result<()> {
         }
     }
 
+    if let Some(ref e) = last_error {
+        if is_dir_not_empty_error(e) {
+            for round in 0..DIR_NOT_EMPTY_CLEANUP_ROUNDS {
+                thread::sleep(Duration::from_millis(
+                    DIR_NOT_EMPTY_CLEANUP_DELAYS_MS[round],
+                ));
+
+                cleanup_remaining_entries(path);
+
+                match unsafe { posix_delete_dir(&wide_path) } {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        if !is_dir_not_empty_error(&e)
+                            && !is_retryable_error(e.raw_os_error().unwrap_or(0))
+                        {
+                            return Err(e);
+                        }
+                        last_error = Some(e);
+                    }
+                }
+            }
+        }
+    }
+
     Err(last_error.unwrap_or_else(|| io::Error::other("max retries exceeded")))
+}
+
+#[cfg(windows)]
+fn cleanup_remaining_entries(path: &Path) {
+    let _ = enumerate_files(path, |entry| {
+        let wide = path_to_wide(&entry.path);
+        if entry.is_dir {
+            cleanup_remaining_entries(&entry.path);
+            let _ = unsafe { posix_delete_dir(&wide) };
+        } else {
+            let _ = unsafe { posix_delete_file(&wide) };
+        }
+        Ok(())
+    });
 }
 
 #[cfg(windows)]
@@ -752,6 +796,11 @@ pub fn is_file_in_use_error(error: &io::Error) -> bool {
         error.raw_os_error(),
         Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
     )
+}
+
+pub fn is_dir_not_empty_error(error: &io::Error) -> bool {
+    const ERROR_DIR_NOT_EMPTY: i32 = 145;
+    error.raw_os_error() == Some(ERROR_DIR_NOT_EMPTY)
 }
 
 pub fn is_not_found_error(error: &io::Error) -> bool {

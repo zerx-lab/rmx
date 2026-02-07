@@ -185,6 +185,9 @@ fn delete_files_sequential(
 
     for path in files {
         if let Err(e) = delete_file(path) {
+            if is_not_found_error(&e) {
+                continue;
+            }
             if config.kill_processes && is_file_in_use_error(&e) {
                 locked_files.push((path.clone(), e));
             } else {
@@ -206,6 +209,7 @@ fn delete_files_parallel(
         .with_min_len(min_chunk_size())
         .filter_map(|path| match delete_file(path) {
             Ok(()) => None,
+            Err(e) if is_not_found_error(&e) => None,
             Err(e) => {
                 if config.kill_processes && is_file_in_use_error(&e) {
                     Some((path.clone(), e))
