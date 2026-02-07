@@ -77,6 +77,12 @@ struct Args {
 
     #[arg(long = "gui", help = "Show GUI progress window (used by context menu)")]
     gui: bool,
+
+    #[arg(
+        long = "unlock",
+        help = "Only unlock files/directories (close handles) without deleting"
+    )]
+    unlock: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -111,6 +117,14 @@ fn main() {
         eprintln!("rmx: missing operand");
         eprintln!("Try 'rmx --help' for more information.");
         process::exit(1);
+    }
+
+    if args.unlock {
+        if let Err(e) = run_unlock(&args) {
+            eprintln!("rmx: {}", e);
+            process::exit(1);
+        }
+        return;
     }
 
     if let Err(e) = run(args) {
@@ -491,6 +505,7 @@ fn delete_directory_with_gui(path: &Path, args: &Args) -> Result<DeletionStats, 
         no_preserve_root: args.no_preserve_root,
         kill_processes: args.kill_processes,
         gui: false,
+        unlock: false,
     };
 
     let delete_handle = thread::spawn(move || {
@@ -708,4 +723,154 @@ fn confirm_yes() -> Result<bool, Error> {
 
     let response = response.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
+}
+
+// ── Unlock mode ──────────────────────────────────────────────────────────
+
+fn run_unlock(args: &Args) -> Result<(), Error> {
+    let verbose = args.verbose;
+
+    for path in &args.paths {
+        let exists = rmx::winapi::path_exists(path);
+        if !exists {
+            eprintln!(
+                "rmx: cannot access '{}': No such file or directory",
+                path.display()
+            );
+            continue;
+        }
+
+        let is_dir = rmx::winapi::is_directory(path);
+        if is_dir {
+            unlock_directory(path, verbose)?;
+        } else {
+            unlock_single_file(path, verbose)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn unlock_single_file(path: &Path, verbose: bool) -> Result<(), Error> {
+    if verbose {
+        println!("unlocking '{}'...", path.display());
+    }
+
+    // Step 1: Restart Manager — 精准杀掉占用进程
+    match rmx::winapi::kill_locking_processes(path, verbose) {
+        Ok(killed) if !killed.is_empty() => {
+            for p in &killed {
+                println!("  killed '{}' (PID {})", p.name, p.pid);
+            }
+        }
+        _ => {}
+    }
+
+    // Step 2: 暴力句柄扫描兜底
+    let paths = [path.to_path_buf()];
+    match rmx::winapi::force_close_file_handles(&paths, verbose) {
+        Ok(count) if count > 0 => {
+            println!("  closed {} handle(s) for '{}'", count, path.display());
+        }
+        _ => {
+            if verbose {
+                println!("  no locks found for '{}'", path.display());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn unlock_directory(path: &Path, verbose: bool) -> Result<(), Error> {
+    println!("unlocking directory '{}'...", path.display());
+
+    let tree = tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
+
+    // 收集所有文件路径
+    let mut all_files: Vec<PathBuf> = Vec::new();
+    for files in tree.dir_files.values() {
+        all_files.extend(files.iter().cloned());
+    }
+
+    // 也把目录本身和所有子目录加入解锁列表
+    let mut all_dirs: Vec<PathBuf> = tree.dirs.clone();
+    all_dirs.push(path.to_path_buf());
+
+    let total_items = all_files.len() + all_dirs.len();
+    println!(
+        "  scanning complete: {} files, {} directories",
+        all_files.len(),
+        all_dirs.len()
+    );
+
+    if total_items == 0 {
+        println!("  nothing to unlock");
+        return Ok(());
+    }
+
+    // Step 1: 批量用 Restart Manager 解锁文件
+    let mut total_killed = 0usize;
+    let mut total_handles_closed = 0usize;
+
+    // 用批量 API 处理文件（Restart Manager 支持批量注册）
+    if !all_files.is_empty() {
+        match rmx::winapi::kill_locking_processes_batch(&all_files, verbose) {
+            Ok(killed) => {
+                for p in &killed {
+                    if verbose {
+                        println!("  killed '{}' (PID {})", p.name, p.pid);
+                    }
+                }
+                total_killed += killed.len();
+            }
+            Err(e) => {
+                if verbose {
+                    eprintln!("  warning: batch process kill failed: {}", e);
+                }
+            }
+        }
+    }
+
+    // 对目录也做 Restart Manager
+    if !all_dirs.is_empty() {
+        match rmx::winapi::kill_locking_processes_batch(&all_dirs, verbose) {
+            Ok(killed) => {
+                for p in &killed {
+                    if verbose {
+                        println!("  killed '{}' (PID {})", p.name, p.pid);
+                    }
+                }
+                total_killed += killed.len();
+            }
+            Err(e) => {
+                if verbose {
+                    eprintln!("  warning: batch directory process kill failed: {}", e);
+                }
+            }
+        }
+    }
+
+    // Step 2: 暴力句柄扫描兜底 — 合并所有路径一次性扫描
+    let mut all_paths: Vec<PathBuf> = Vec::with_capacity(all_files.len() + all_dirs.len());
+    all_paths.extend(all_files);
+    all_paths.extend(all_dirs);
+
+    match rmx::winapi::force_close_file_handles(&all_paths, verbose) {
+        Ok(count) => {
+            total_handles_closed += count;
+        }
+        Err(e) => {
+            if verbose {
+                eprintln!("  warning: force close handles failed: {}", e);
+            }
+        }
+    }
+
+    println!(
+        "  done: killed {} process(es), closed {} handle(s)",
+        total_killed, total_handles_closed
+    );
+
+    Ok(())
 }

@@ -181,7 +181,7 @@ fn get_shell_dll_path() -> io::Result<PathBuf> {
     Ok(exe_dir.join("rmx-shell.dll"))
 }
 
-fn locking_processes_hint(path: &PathBuf) -> String {
+fn locking_processes_hint(path: &Path) -> String {
     match winapi::find_locking_processes(path) {
         Ok(procs) if !procs.is_empty() => {
             let list: Vec<String> = procs
@@ -220,7 +220,7 @@ where
 
     eprintln!(
         "DLL 被占用，正在重启 Explorer...{}",
-        locking_processes_hint(&dll_path.to_path_buf())
+        locking_processes_hint(dll_path)
     );
 
     kill_explorer();
