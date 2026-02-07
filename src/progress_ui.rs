@@ -730,6 +730,8 @@ struct KillFailure {
     error: String,
 }
 
+type KillResult = Arc<parking_lot::Mutex<Option<(usize, Vec<KillFailure>)>>>;
+
 enum UnlockPhase {
     Confirm,
     Working,
@@ -742,7 +744,7 @@ pub struct UnlockProgressWindow {
     locking_processes: Vec<crate::winapi::LockingProcess>,
     phase: UnlockPhase,
     confirm_signal: Arc<AtomicBool>,
-    result: Arc<parking_lot::Mutex<Option<(usize, Vec<KillFailure>)>>>,
+    result: KillResult,
 }
 
 impl UnlockProgressWindow {

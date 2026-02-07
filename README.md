@@ -55,19 +55,46 @@ Benchmark on 5,301 items (5,000 files, 301 directories):
 # Add the rmx bucket
 scoop bucket add rmx https://github.com/zerx-lab/rmx
 
-# Install rmx
+# Install
 scoop install rmx
 ```
 
 ### Cargo
 
 ```bash
+# Install from GitHub
+cargo install --git https://github.com/zerx-lab/rmx
+
+# Or install from local source
 cargo install --path .
 ```
 
 ### Manual Download
 
 Download the latest release from [GitHub Releases](https://github.com/zerx-lab/rmx/releases).
+
+## 🔄 Update
+
+```bash
+# Self-upgrade (recommended)
+rmx upgrade
+
+# Only check for updates
+rmx upgrade --check
+
+# Force upgrade, bypass package manager detection
+rmx upgrade --force
+```
+
+Or update via your package manager:
+
+```powershell
+# Scoop
+scoop update rmx
+
+# Cargo
+cargo install --git https://github.com/zerx-lab/rmx --force
+```
 
 ## 📖 Usage
 
@@ -130,6 +157,21 @@ rmx -v --stats ./target
 rmx --force ./path
 ```
 
+### Self Upgrade
+
+```bash
+# Upgrade to the latest version
+rmx upgrade
+
+# Only check if a new version is available
+rmx upgrade --check
+
+# Force upgrade, bypass package manager detection
+rmx upgrade --force
+```
+
+rmx auto-detects the installation method (Scoop, Cargo, npm). For manual installations, it downloads the latest release from GitHub and replaces the binary in-place.
+
 ### Shell Extension
 
 Initialize rmx shell extension for Windows Explorer right-click menu:
@@ -156,6 +198,16 @@ After initialization, right-click any file or folder to see "Delete with rmx" op
 | `--no-preserve-root` | Do not treat '/' specially |
 | `--kill-processes` | Terminate processes locking files/directories, then delete them |
 | `--unlock` | Only unlock files/directories (close handles) without deleting |
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `init` | Initialize shell extension (Windows Explorer right-click menu) |
+| `uninstall` | Remove shell extension and context menu handler |
+| `upgrade` | Upgrade rmx to the latest version from GitHub Releases |
+| `upgrade --check` | Only check for updates without installing |
+| `upgrade --force` | Force upgrade, bypass package manager detection |
 
 ## 🛡️ Safety Features
 

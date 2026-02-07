@@ -6,5 +6,6 @@ pub mod error;
 pub mod progress_ui;
 pub mod safety;
 pub mod tree;
+pub mod upgrade;
 pub mod winapi;
 pub mod worker;

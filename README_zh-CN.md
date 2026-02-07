@@ -55,19 +55,46 @@
 # 添加 rmx bucket
 scoop bucket add rmx https://github.com/zerx-lab/rmx
 
-# 安装 rmx
+# 安装
 scoop install rmx
 ```
 
 ### Cargo
 
 ```bash
+# 从 GitHub 安装
+cargo install --git https://github.com/zerx-lab/rmx
+
+# 或从本地源码安装
 cargo install --path .
 ```
 
 ### 手动下载
 
 从 [GitHub Releases](https://github.com/zerx-lab/rmx/releases) 下载最新版本。
+
+## 🔄 更新
+
+```bash
+# 自升级（推荐）
+rmx upgrade
+
+# 仅检查是否有新版本
+rmx upgrade --check
+
+# 强制升级，跳过包管理器检测
+rmx upgrade --force
+```
+
+或通过包管理器更新：
+
+```powershell
+# Scoop
+scoop update rmx
+
+# Cargo
+cargo install --git https://github.com/zerx-lab/rmx --force
+```
 
 ## 📖 使用方法
 
@@ -130,6 +157,21 @@ rmx -v --stats ./target
 rmx --force ./path
 ```
 
+### 自升级
+
+```bash
+# 升级到最新版本
+rmx upgrade
+
+# 仅检查是否有新版本
+rmx upgrade --check
+
+# 强制升级，跳过包管理器检测
+rmx upgrade --force
+```
+
+rmx 会自动检测安装方式（Scoop、Cargo、npm）。对于手动安装的情况，会从 GitHub 下载最新版本并原地替换二进制文件。
+
 ### Shell 扩展
 
 初始化 rmx shell 扩展，集成到 Windows 资源管理器右键菜单：
@@ -156,6 +198,16 @@ rmx init
 | `--no-preserve-root` | 不特殊处理根目录 |
 | `--kill-processes` | 终止占用文件/文件夹的进程，然后删除它们 |
 | `--unlock` | 仅解除文件/文件夹的占用（关闭句柄），不删除 |
+
+### 子命令
+
+| 子命令 | 说明 |
+|--------|------|
+| `init` | 初始化 shell 扩展（Windows 资源管理器右键菜单） |
+| `uninstall` | 移除 shell 扩展和右键菜单 |
+| `upgrade` | 从 GitHub Releases 升级 rmx 到最新版本 |
+| `upgrade --check` | 仅检查是否有新版本，不安装 |
+| `upgrade --force` | 强制升级，跳过包管理器检测 |
 
 ## 🛡️ 安全特性
 

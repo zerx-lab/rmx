@@ -108,9 +108,21 @@ enum Command {
     Init,
     #[command(about = "Remove rmx shell extension and context menu handler")]
     Uninstall,
+    #[command(about = "Upgrade rmx to the latest version from GitHub Releases")]
+    Upgrade {
+        #[arg(long, help = "Only check for updates without installing")]
+        check: bool,
+        #[arg(
+            short = 'f',
+            long,
+            help = "Force upgrade, bypass package manager detection"
+        )]
+        force: bool,
+    },
 }
 
 fn main() {
+    rmx::upgrade::cleanup_old_binary();
     let args = Args::parse();
 
     #[cfg(windows)]
@@ -177,15 +189,21 @@ fn run_command(command: Command) -> Result<(), std::io::Error> {
             println!("rmx shell extension has been removed.");
             Ok(())
         }
+        Command::Upgrade { check, force } => rmx::upgrade::run_upgrade(check, force)
+            .map_err(|e| std::io::Error::other(e.to_string())),
     }
 }
 
 #[cfg(not(windows))]
-fn run_command(_command: Command) -> Result<(), std::io::Error> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "Shell extension is only available on Windows",
-    ))
+fn run_command(command: Command) -> Result<(), std::io::Error> {
+    match command {
+        Command::Upgrade { check, force } => rmx::upgrade::run_upgrade(check, force)
+            .map_err(|e| std::io::Error::other(e.to_string())),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Shell extension is only available on Windows",
+        )),
+    }
 }
 
 fn run(args: Args) -> Result<(), Error> {
