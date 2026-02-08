@@ -679,9 +679,18 @@ fn delete_directory_internal(
     let file_count = tree.file_count;
     let total_bytes = tree.total_bytes;
 
-    let worker_count = args.threads.unwrap_or_else(tree::cpu_count);
+    let worker_count = if let Some(t) = args.threads {
+        t
+    } else {
+        let base = tree::cpu_count();
+        if rmx::winapi::is_ssd_drive(path) {
+            (base * 5 / 4).max(base + 1)
+        } else {
+            (base * 2).min(64)
+        }
+    };
 
-    let (broker, tx, rx) = Broker::new(tree);
+    let (broker, rx) = Broker::new(tree, worker_count);
     let broker = Arc::new(broker);
 
     let error_tracker = Arc::new(worker::ErrorTracker::new());
@@ -698,8 +707,6 @@ fn delete_directory_internal(
         worker_config,
         error_tracker.clone(),
     );
-    drop(tx);
-
     let progress_handle = if args.verbose && dir_count > 10 {
         let total = broker.total_dirs();
         let broker_clone = broker.clone();

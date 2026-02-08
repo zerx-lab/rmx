@@ -27,12 +27,14 @@
 
 ## ✨ Performance
 
-Benchmark on 5,301 items (5,000 files, 301 directories):
+Benchmark: 476 MB / 51,705 files+directories (npm node_modules, 3-run average)
 
-| Method | Time | vs rmx |
-|:------:|:----:|:------:|
-| **⚡ rmx** | **514ms** | **1.00x** |
-| PowerShell Remove-Item | 1,150ms | 2.2x slower |
+| Rank | Method | Time | vs rmx |
+|:---:|:---:|:---:|:---:|
+| 🥇 | **⚡ rmx** | **4,120 ms** | **1.00x** |
+| 🥈 | cmd rmdir /s /q | 7,496 ms | 1.82x slower |
+| 🥉 | PowerShell Remove-Item | 7,623 ms | 1.85x slower |
+| 4 | Git Bash rm -rf | 8,394 ms | 2.04x slower |
 
 ## 🚀 Key Features
 

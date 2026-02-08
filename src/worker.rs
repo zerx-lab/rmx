@@ -1,4 +1,4 @@
-use crate::broker::Broker;
+use crate::broker::{Broker, WorkItem};
 use crate::error::FailedItem;
 use crate::winapi::{
     delete_file, force_close_file_handles, is_file_in_use_error, is_not_found_error,
@@ -60,7 +60,7 @@ impl Default for ErrorTracker {
 
 pub fn spawn_workers(
     count: usize,
-    rx: Receiver<PathBuf>,
+    rx: Receiver<WorkItem>,
     broker: Arc<Broker>,
     config: WorkerConfig,
     error_tracker: Arc<ErrorTracker>,
@@ -80,59 +80,77 @@ pub fn spawn_workers(
 }
 
 fn worker_thread(
-    rx: Receiver<PathBuf>,
+    rx: Receiver<WorkItem>,
     broker: Arc<Broker>,
     config: WorkerConfig,
     error_tracker: Arc<ErrorTracker>,
 ) {
-    while let Ok(dir) = rx.recv() {
-        if let Some(files) = broker.take_files(&dir) {
-            delete_files_from_list(&files, &config, &error_tracker);
+    while let Ok(item) = rx.recv() {
+        match item {
+            WorkItem::DeleteFiles { files, parent_dir } => {
+                delete_files_from_list(&files, &config, &error_tracker);
+                broker.mark_batch_complete(&parent_dir);
+            }
+            WorkItem::ProcessDir(dir) => {
+                process_directory(&dir, &broker, &config, &error_tracker);
+            }
+            WorkItem::Shutdown => break,
         }
-
-        if let Err(e) = remove_dir(&dir) {
-            if is_not_found_error(&e) {
-                broker.mark_complete(dir);
-                continue;
-            }
-
-            if config.kill_processes && is_file_in_use_error(&e) {
-                let _ = kill_locking_processes(&dir, config.verbose);
-                if let Ok(()) = remove_dir(&dir) {
-                    broker.mark_complete(dir);
-                    continue;
-                }
-
-                let _ = force_close_file_handles(std::slice::from_ref(&dir), config.verbose);
-                match remove_dir(&dir) {
-                    Ok(()) => {
-                        broker.mark_complete(dir);
-                        continue;
-                    }
-                    Err(retry_err) if is_not_found_error(&retry_err) => {
-                        broker.mark_complete(dir);
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-
-            let msg = e.to_string();
-            if config.verbose {
-                eprintln!("Warning: Failed to remove {}: {}", dir.display(), msg);
-            }
-            error_tracker.record_failure(FailedItem {
-                path: dir.clone(),
-                error: msg,
-                is_dir: true,
-            });
-
-            broker.mark_complete(dir);
-            continue;
-        }
-
-        broker.mark_complete(dir);
     }
+}
+
+fn process_directory(
+    dir: &PathBuf,
+    broker: &Arc<Broker>,
+    config: &WorkerConfig,
+    error_tracker: &Arc<ErrorTracker>,
+) {
+    if let Some(files) = broker.take_files(dir) {
+        delete_files_from_list(&files, config, error_tracker);
+    }
+
+    if let Err(e) = remove_dir(dir) {
+        if is_not_found_error(&e) {
+            broker.mark_complete(dir.clone());
+            return;
+        }
+
+        if config.kill_processes && is_file_in_use_error(&e) {
+            let _ = kill_locking_processes(dir, config.verbose);
+            if let Ok(()) = remove_dir(dir) {
+                broker.mark_complete(dir.clone());
+                return;
+            }
+
+            let _ = force_close_file_handles(std::slice::from_ref(dir), config.verbose);
+            match remove_dir(dir) {
+                Ok(()) => {
+                    broker.mark_complete(dir.clone());
+                    return;
+                }
+                Err(retry_err) if is_not_found_error(&retry_err) => {
+                    broker.mark_complete(dir.clone());
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let msg = e.to_string();
+        if config.verbose {
+            eprintln!("Warning: Failed to remove {}: {}", dir.display(), msg);
+        }
+        error_tracker.record_failure(FailedItem {
+            path: dir.clone(),
+            error: msg,
+            is_dir: true,
+        });
+
+        broker.mark_complete(dir.clone());
+        return;
+    }
+
+    broker.mark_complete(dir.clone());
 }
 
 fn cpu_count() -> usize {

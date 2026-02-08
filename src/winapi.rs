@@ -131,21 +131,36 @@ pub fn is_directory(path: &Path) -> bool {
 #[cfg(windows)]
 fn path_to_wide(path: &Path) -> Vec<u16> {
     let path_str = path.to_string_lossy();
-    // Normalize forward slashes to backslashes for Windows compatibility
-    let normalized = path_str.replace('/', "\\");
 
-    // Check if path is absolute (handles both C:\ and \\?\ formats)
-    let is_absolute = normalized.starts_with(r"\\?\")
-        || (normalized.len() >= 3
-            && normalized.chars().nth(1) == Some(':')
-            && normalized.chars().nth(2) == Some('\\'));
+    // Check if already has \\?\ prefix
+    let has_prefix = path_str.starts_with(r"\\?\");
 
-    let prefixed = if is_absolute && !normalized.starts_with(r"\\?\") {
-        format!(r"\\?\{}", normalized)
-    } else {
-        normalized
+    // Check if path is absolute (C:\ or C:/)
+    let is_absolute = has_prefix || {
+        let bytes = path_str.as_bytes();
+        bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
     };
-    prefixed.encode_utf16().chain(std::iter::once(0)).collect()
+
+    let needs_prefix = is_absolute && !has_prefix;
+
+    // Pre-allocate: path length + optional \\?\ prefix (4 chars) + null terminator
+    let capacity = path_str.len() + if needs_prefix { 5 } else { 1 };
+    let mut wide = Vec::with_capacity(capacity);
+
+    if needs_prefix {
+        wide.extend_from_slice(&[0x5C, 0x5C, 0x3F, 0x5C]); // \\?\
+    }
+
+    // Encode to UTF-16 in a single pass, normalizing '/' to '\' inline.
+    // Avoids the intermediate String allocation from replace('/','\\').
+    for c in path_str.encode_utf16() {
+        wide.push(if c == 0x2F { 0x5C } else { c });
+    }
+    wide.push(0);
+    wide
 }
 
 #[cfg(windows)]
@@ -258,7 +273,7 @@ fn cleanup_remaining_entries(path: &Path) {
 unsafe fn posix_delete_file(wide_path: &[u16]) -> io::Result<()> {
     let handle = CreateFileW(
         PCWSTR(wide_path.as_ptr()),
-        DELETE.0,
+        DELETE.0 | 0x00100000, // DELETE | SYNCHRONIZE: faster kernel code path per llfio research
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         None,
         OPEN_EXISTING,
@@ -292,7 +307,7 @@ unsafe fn posix_delete_file(wide_path: &[u16]) -> io::Result<()> {
 unsafe fn posix_delete_dir(wide_path: &[u16]) -> io::Result<()> {
     let handle = CreateFileW(
         PCWSTR(wide_path.as_ptr()),
-        DELETE.0,
+        DELETE.0 | 0x00100000, // DELETE | SYNCHRONIZE
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         None,
         OPEN_EXISTING,
@@ -356,7 +371,7 @@ where
             &mut find_data as *mut _ as *mut _,
             FINDEX_SEARCH_OPS(0),
             None,
-            FIND_FIRST_EX_FLAGS(0),
+            FIND_FIRST_EX_FLAGS(2), // FIND_FIRST_EX_LARGE_FETCH: prefetch more entries per syscall
         ) {
             Ok(h) => h,
             Err(_) => {
@@ -389,15 +404,22 @@ where
                 .iter()
                 .position(|&c| c == 0)
                 .unwrap_or(find_data.cFileName.len());
-            let filename = String::from_utf16_lossy(&find_data.cFileName[..name_len]);
+            let name_slice = &find_data.cFileName[..name_len];
 
-            if filename != "." && filename != ".." {
+            let is_dot = name_len == 1 && name_slice[0] == 0x2E;
+            let is_dotdot = name_len == 2 && name_slice[0] == 0x2E && name_slice[1] == 0x2E;
+
+            if !is_dot && !is_dotdot {
                 let is_dir = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
                 let is_symlink = (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0;
                 let size = if is_dir {
                     0
                 } else {
                     ((find_data.nFileSizeHigh as u64) << 32) | (find_data.nFileSizeLow as u64)
+                };
+                let filename = {
+                    use std::os::windows::ffi::OsStringExt;
+                    std::ffi::OsString::from_wide(name_slice)
                 };
                 let full_path = dir.join(&filename);
                 callback(FileEntry {
@@ -1084,4 +1106,90 @@ fn query_system_handles() -> io::Result<Vec<u8>> {
 #[cfg(not(windows))]
 pub fn force_close_file_handles(_paths: &[PathBuf], _verbose: bool) -> io::Result<usize> {
     Ok(0)
+}
+
+// ============================================================================
+// SSD / HDD detection via IOCTL_STORAGE_QUERY_PROPERTY
+// ============================================================================
+
+#[cfg(windows)]
+const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D1400;
+
+#[cfg(windows)]
+#[repr(C)]
+struct StoragePropertyQuery {
+    property_id: u32,
+    query_type: u32,
+    additional_parameters: [u8; 1],
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct DeviceSeekPenaltyDescriptor {
+    version: u32,
+    size: u32,
+    incurs_seek_penalty: u8,
+}
+
+/// Returns `true` if the drive containing `path` is an SSD (no seek penalty).
+/// Returns `true` on any detection failure (safe default: treat as SSD).
+#[cfg(windows)]
+pub fn is_ssd_drive(path: &Path) -> bool {
+    use windows::Win32::System::IO::DeviceIoControl;
+
+    let path_str = path.to_string_lossy();
+    let drive_letter = match path_str.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() && path_str.chars().nth(1) == Some(':') => c,
+        _ => return true,
+    };
+
+    let volume = format!("\\\\.\\{}:", drive_letter);
+    let wide_volume: Vec<u16> = volume.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let handle = match CreateFileW(
+            PCWSTR(wide_volume.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            HANDLE::default(),
+        ) {
+            Ok(h) => h,
+            Err(_) => return true,
+        };
+
+        let query = StoragePropertyQuery {
+            property_id: 7, // StorageDeviceSeekPenaltyProperty
+            query_type: 0,  // PropertyStandardQuery
+            additional_parameters: [0],
+        };
+
+        let mut descriptor: DeviceSeekPenaltyDescriptor = std::mem::zeroed();
+        let mut bytes_returned: u32 = 0;
+
+        let ok = DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(&query as *const _ as *const c_void),
+            std::mem::size_of::<StoragePropertyQuery>() as u32,
+            Some(&mut descriptor as *mut _ as *mut c_void),
+            std::mem::size_of::<DeviceSeekPenaltyDescriptor>() as u32,
+            Some(&mut bytes_returned),
+            None,
+        );
+
+        CloseHandle(handle).ok();
+
+        match ok {
+            Ok(()) => descriptor.incurs_seek_penalty == 0,
+            Err(_) => true,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_ssd_drive(_path: &Path) -> bool {
+    true
 }

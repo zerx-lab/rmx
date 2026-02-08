@@ -76,7 +76,6 @@ pub fn discover_tree(root: &Path) -> io::Result<DirectoryTree> {
     let mut tree = DirectoryTree::new();
 
     tree.dirs = all_dirs.into_iter().collect();
-    tree.dirs.sort();
 
     tree.children = children_map.into_iter().collect();
     tree.dir_files = dir_files_map.into_iter().collect();
@@ -103,8 +102,8 @@ fn scan_parallel(
 ) {
     all_dirs.insert(dir.to_path_buf());
 
-    let mut child_dirs = Vec::new();
-    let mut files = Vec::new();
+    let mut child_dirs = Vec::with_capacity(16);
+    let mut files = Vec::with_capacity(64);
     let mut local_bytes = 0u64;
 
     let mut symlink_dirs = Vec::new();
