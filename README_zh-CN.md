@@ -23,9 +23,20 @@
 
 </div>
 
-<div align="center">
-<img src="docs/promo.webp" alt="rmx 演示" width="640">
-</div>
+<table align="center">
+<tr>
+<td align="center"><b>🖥️ 资源管理器 vs rmx</b></td>
+<td align="center"><b>⚡ 终端性能对比</b></td>
+</tr>
+<tr>
+<td><img src="docs/demo.webp" alt="rmx 资源管理器演示" width="400"></td>
+<td><img src="docs/promo.webp" alt="rmx 终端性能对比" width="400"></td>
+</tr>
+<tr>
+<td align="center"><sub>Windows 资源管理器删除 vs rmx — 天壤之别</sub></td>
+<td align="center"><sub>rmx vs rmdir /s /q — 并行完胜</sub></td>
+</tr>
+</table>
 
 ---
 

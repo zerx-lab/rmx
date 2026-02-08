@@ -23,9 +23,20 @@
 
 </div>
 
-<div align="center">
-<img src="docs/promo.webp" alt="rmx demo" width="640">
-</div>
+<table align="center">
+<tr>
+<td align="center"><b>🖥️ Explorer vs rmx</b></td>
+<td align="center"><b>⚡ Terminal Benchmark</b></td>
+</tr>
+<tr>
+<td><img src="docs/demo.webp" alt="rmx Explorer demo" width="400"></td>
+<td><img src="docs/promo.webp" alt="rmx terminal benchmark" width="400"></td>
+</tr>
+<tr>
+<td align="center"><sub>Windows Explorer delete vs rmx — night and day</sub></td>
+<td align="center"><sub>rmx vs rmdir /s /q — parallel wins</sub></td>
+</tr>
+</table>
 
 ---
 
