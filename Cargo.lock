@@ -4623,6 +4623,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-queue",
  "dashmap",
+ "glob",
  "gpui",
  "gpui-component",
  "gpui-component-assets",

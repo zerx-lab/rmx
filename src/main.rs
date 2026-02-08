@@ -3,6 +3,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
+use glob::glob;
 use rmx::{broker::Broker, error::Error, safety, tree, worker};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,9 @@ const APP_VERSION: &str = env!("APP_VERSION");
   rmx -rf ./target                Force delete directory (no confirmation)\n  \
   rmx -rfv ./dist                 Force delete with verbose output\n  \
   rmx -rf dir1 dir2 dir3          Delete multiple directories\n  \
+  rmx -f *.log                    Delete all .log files (glob pattern)\n  \
+  rmx -f temp_*                   Delete files starting with temp_\n  \
+  rmx -rf build_[0-9]*            Delete directories matching pattern\n  \
    rmx init                        Initialize rmx shell extension (install/reinstall)\n  \
    rmx uninstall                   Remove rmx shell extension")]
 struct Args {
@@ -123,7 +127,7 @@ enum Command {
 
 fn main() {
     rmx::upgrade::cleanup_old_binary();
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     #[cfg(windows)]
     if args.gui {
@@ -156,6 +160,19 @@ fn main() {
     if args.paths.is_empty() {
         eprintln!("rmx: missing operand");
         eprintln!("Try 'rmx --help' for more information.");
+        process::exit(1);
+    }
+
+    // Windows shell 不展开 glob，需要应用层自行处理
+    let had_glob = args
+        .paths
+        .iter()
+        .any(|p| contains_glob_chars(&p.to_string_lossy()));
+    args.paths = expand_globs(&args.paths, args.force);
+    if args.paths.is_empty() {
+        if had_glob && args.force {
+            return;
+        }
         process::exit(1);
     }
 
@@ -912,6 +929,47 @@ fn write_skip_confirm(skip: bool) {
         );
         let _ = RegCloseKey(hkey);
     }
+}
+
+fn contains_glob_chars(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+fn expand_globs(paths: &[PathBuf], force: bool) -> Vec<PathBuf> {
+    let mut expanded = Vec::new();
+
+    for path in paths {
+        let path_str = path.to_string_lossy();
+        if !contains_glob_chars(&path_str) {
+            expanded.push(path.clone());
+            continue;
+        }
+
+        match glob(&path_str) {
+            Ok(entries) => {
+                let mut matched = false;
+                for entry in entries {
+                    match entry {
+                        Ok(p) => {
+                            matched = true;
+                            expanded.push(p);
+                        }
+                        Err(e) => {
+                            eprintln!("rmx: glob error: {}", e);
+                        }
+                    }
+                }
+                if !matched && !force {
+                    eprintln!("rmx: cannot remove '{}': No match", path_str);
+                }
+            }
+            Err(e) => {
+                eprintln!("rmx: invalid pattern '{}': {}", path_str, e);
+            }
+        }
+    }
+
+    expanded
 }
 
 fn confirm_deletion(path: &Path, is_dir: bool) -> Result<bool, Error> {
