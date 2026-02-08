@@ -1,6 +1,6 @@
 [package]
 name = "rmx"
-version = "0.1.0"
+version = "0.2.8"
 edition = "2021"
 authors = ["rmx contributors"]
 description = "Fast parallel directory deletion for Windows - blazingly fast removal of node_modules, target, and other large directories"

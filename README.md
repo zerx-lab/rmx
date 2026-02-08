@@ -23,6 +23,10 @@
 
 </div>
 
+<div align="center">
+<img src="docs/promo.webp" alt="rmx demo" width="640">
+</div>
+
 ---
 
 ## ✨ Performance

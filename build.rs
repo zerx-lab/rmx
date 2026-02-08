@@ -2,17 +2,55 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Version priority: CI_VERSION (release) > git describe > CARGO_PKG_VERSION+hash
     let version = if let Ok(ci_version) = std::env::var("CI_VERSION") {
         ci_version
     } else {
-        std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".to_string())
+        resolve_git_version()
     };
 
     println!("cargo::rustc-env=APP_VERSION={}", version);
 
+    let commit_hash = git_cmd(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    println!("cargo::rustc-env=GIT_COMMIT_HASH={}", commit_hash);
+
+    println!("cargo::rerun-if-changed=.git/HEAD");
+    println!("cargo::rerun-if-changed=.git/refs/");
+    println!("cargo::rerun-if-env-changed=CI_VERSION");
+
     if cfg!(windows) {
         build_rmx_shell();
     }
+}
+
+fn resolve_git_version() -> String {
+    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+
+    let describe = git_cmd(&["describe", "--tags", "--always"]);
+    let hash = git_cmd(&["rev-parse", "--short", "HEAD"]);
+
+    match describe {
+        // "0.2.8" or "0.2.8-3-g20679e1" — tag info available (--path or full clone)
+        Some(ref desc) if desc.contains('.') => desc.clone(),
+        // bare hash "20679e1" — no tags (cargo install --git shallow checkout)
+        _ => match hash {
+            Some(h) => format!("{}-g{}", pkg_version, h),
+            None => pkg_version,
+        },
+    }
+}
+
+fn git_cmd(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(output.stdout).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(s.strip_prefix('v').unwrap_or(s).to_string())
 }
 
 fn build_rmx_shell() {

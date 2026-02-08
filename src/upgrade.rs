@@ -54,13 +54,12 @@ impl InstallMethod {
         }
     }
 
-    /// 返回包管理器升级提示；Manual 返回 None
     fn upgrade_hint(&self) -> Option<&'static str> {
         match self {
             InstallMethod::Scoop => Some("scoop update rmx"),
-            InstallMethod::Cargo => {
-                Some("cargo install --git https://github.com/zerx-lab/rmx --force")
-            }
+            // Cargo installs can self-update by downloading from GitHub Releases,
+            // so we treat them like Manual to enable direct binary replacement.
+            InstallMethod::Cargo => None,
             InstallMethod::Npm => Some("npm update -g rmx"),
             InstallMethod::Manual => None,
         }
@@ -105,18 +104,7 @@ pub fn run_upgrade(check_only: bool, force: bool) -> anyhow::Result<()> {
     println!("v{}", latest_version);
 
     if !force {
-        let current = semver::Version::parse(current_version).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to parse current version '{}': {}",
-                current_version,
-                e
-            )
-        })?;
-        let latest = semver::Version::parse(latest_version).map_err(|e| {
-            anyhow::anyhow!("failed to parse latest version '{}': {}", latest_version, e)
-        })?;
-
-        if current >= latest {
+        if is_up_to_date(current_version, latest_version) {
             println!("rmx: already up to date");
             return Ok(());
         }
@@ -245,6 +233,46 @@ fn replace_self(new_exe: &Path) -> anyhow::Result<PathBuf> {
     }
 
     Ok(current_exe)
+}
+
+/// Parse a git-describe version like "0.2.8-3-g20679e1" into (base_version, commits_ahead).
+/// Pure semver like "0.2.8" returns (version, 0). Returns None if unparseable.
+fn parse_git_describe_version(version: &str) -> Option<(semver::Version, u64)> {
+    if let Ok(v) = semver::Version::parse(version) {
+        return Some((v, 0));
+    }
+
+    // git describe format: "0.2.8-3-g20679e1" → base="0.2.8", ahead=3
+    let parts: Vec<&str> = version.rsplitn(3, '-').collect();
+    if parts.len() == 3 {
+        let base = parts[2];
+        let ahead: u64 = parts[1].parse().ok()?;
+        let v = semver::Version::parse(base).ok()?;
+        return Some((v, ahead));
+    }
+
+    None
+}
+
+fn is_up_to_date(current: &str, latest: &str) -> bool {
+    let latest_ver = match semver::Version::parse(latest) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    match parse_git_describe_version(current) {
+        Some((base, ahead)) => {
+            if ahead > 0 {
+                // e.g. "0.2.8-3-g20679e1": 3 commits ahead of v0.2.8
+                // Up-to-date only if base tag is already >= latest release
+                base >= latest_ver
+            } else {
+                base >= latest_ver
+            }
+        }
+        // Unparseable version (e.g. bare commit hash "20679e1") — always offer upgrade
+        None => false,
+    }
 }
 
 fn format_size(bytes: u64) -> String {

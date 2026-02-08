@@ -23,6 +23,10 @@
 
 </div>
 
+<div align="center">
+<img src="docs/promo.webp" alt="rmx 演示" width="640">
+</div>
+
 ---
 
 ## ✨ 性能对比
