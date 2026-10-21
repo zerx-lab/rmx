@@ -15,10 +15,38 @@ use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const MENU_SUBMENU_TEXT: PCWSTR = w!("Delete with rmx");
-const MENU_DELETE_TEXT: PCWSTR = w!("Delete");
-const MENU_DELETE_NO_KILL_TEXT: PCWSTR = w!("Delete (no process kill)");
-const MENU_UNLOCK_TEXT: PCWSTR = w!("Unlock");
+use crate::lang::Lang;
+
+/// The menu strings for one language.
+///
+/// The set is picked when the menu is built, so a change of the settings key
+/// shows on the next right click, without an Explorer restart.
+struct MenuTexts {
+    submenu: PCWSTR,
+    delete: PCWSTR,
+    delete_no_kill: PCWSTR,
+    unlock: PCWSTR,
+}
+
+impl MenuTexts {
+    fn for_language(lang: Lang) -> MenuTexts {
+        match lang {
+            Lang::Zh => MenuTexts {
+                submenu: w!("用 rmx 删除"),
+                delete: w!("删除"),
+                delete_no_kill: w!("删除（不结束进程）"),
+                unlock: w!("解锁"),
+            },
+            Lang::En => MenuTexts {
+                submenu: w!("Delete with rmx"),
+                delete: w!("Delete"),
+                delete_no_kill: w!("Delete (no process kill)"),
+                unlock: w!("Unlock"),
+            },
+        }
+    }
+}
+
 const VERB_DELETE: &str = "rmxdelete";
 const VERB_DELETE_NO_KILL: &str = "rmxdeletenokill";
 const VERB_UNLOCK: &str = "rmxunlock";
@@ -102,6 +130,8 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
             return Ok(());
         }
 
+        let texts = MenuTexts::for_language(Lang::current());
+
         unsafe {
             let submenu = CreatePopupMenu()?;
             InsertMenuW(
@@ -109,28 +139,28 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
                 0,
                 MF_STRING | MF_BYPOSITION,
                 (idcmdfirst + CMD_ID_DELETE) as usize,
-                MENU_DELETE_TEXT,
+                texts.delete,
             )?;
             InsertMenuW(
                 submenu,
                 1,
                 MF_STRING | MF_BYPOSITION,
                 (idcmdfirst + CMD_ID_DELETE_NO_KILL) as usize,
-                MENU_DELETE_NO_KILL_TEXT,
+                texts.delete_no_kill,
             )?;
             InsertMenuW(
                 submenu,
                 2,
                 MF_STRING | MF_BYPOSITION,
                 (idcmdfirst + CMD_ID_UNLOCK) as usize,
-                MENU_UNLOCK_TEXT,
+                texts.unlock,
             )?;
             InsertMenuW(
                 hmenu,
                 indexmenu,
                 MF_STRING | MF_BYPOSITION | MF_POPUP,
                 submenu.0 as usize,
-                MENU_SUBMENU_TEXT,
+                texts.submenu,
             )?;
         }
 

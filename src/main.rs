@@ -4,6 +4,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
 use glob::glob;
+use rmx::i18n::Lang;
 use rmx::{broker::Broker, error::Error, safety, tree, worker};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ use rmx::progress_ui::{self, DeleteProgress};
 const SETTINGS_REG_KEY: &str = "Software\\rmx\\Settings";
 #[cfg(windows)]
 const SKIP_CONFIRM_VALUE: &str = "SkipDeleteConfirm";
+#[cfg(windows)]
+const LANGUAGE_VALUE: &str = "Language";
 
 const APP_VERSION: &str = env!("APP_VERSION");
 
@@ -103,9 +106,29 @@ struct Args {
     )]
     reset_confirm: bool,
 
+    #[arg(
+        long = "lang",
+        value_name = "LANG",
+        default_value = "auto",
+        help = "Interface language: zh, en or auto (the Windows UI language)"
+    )]
+    lang: LangChoice,
+
+    /// Interface language, resolved from `lang` and the settings key in `main`.
+    #[arg(skip)]
+    ui_lang: Lang,
+
     /// Set after one confirmation dialog was shown for a multi-path selection.
     #[arg(skip)]
     confirmed: bool,
+}
+
+/// Value of `--lang`: a language code, or `auto` for the Windows UI language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum LangChoice {
+    Zh,
+    En,
+    Auto,
 }
 
 #[derive(Subcommand, Debug)]
@@ -132,6 +155,7 @@ enum Command {
 fn main() {
     rmx::upgrade::cleanup_old_binary();
     let mut args = Args::parse();
+    args.ui_lang = resolve_lang(args.lang);
 
     #[cfg(windows)]
     if args.gui {
@@ -235,6 +259,7 @@ fn run(mut args: Args) -> Result<(), Error> {
             args.paths.clone(),
             args.paths.len(),
             0,
+            args.ui_lang,
         )
         .unwrap_or(progress_ui::ConfirmResult {
             confirmed: false,
@@ -407,7 +432,12 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         #[cfg(windows)]
         if args.gui {
             if !read_skip_confirm() {
-                let result = progress_ui::run_confirmation_dialog(vec![path.to_path_buf()], 1, 0)
+                let result = progress_ui::run_confirmation_dialog(
+                    vec![path.to_path_buf()],
+                    1,
+                    0,
+                    args.ui_lang,
+                )
                     .unwrap_or(progress_ui::ConfirmResult {
                         confirmed: false,
                         skip_next_confirm: false,
@@ -450,7 +480,11 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
             let error = Error::io_with_path(path.to_path_buf(), e);
             #[cfg(windows)]
             if args.gui {
-                let _ = progress_ui::show_error_window(path.to_path_buf(), error_message(&error));
+                let _ = progress_ui::show_error_window(
+                    path.to_path_buf(),
+                    error_message(&error),
+                    args.ui_lang,
+                );
             }
             return Err(error);
         }
@@ -552,6 +586,7 @@ fn process_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
                     vec![path.to_path_buf()],
                     file_count,
                     dir_count,
+                    args.ui_lang,
                 )
                         .unwrap_or(progress_ui::ConfirmResult {
                             confirmed: false,
@@ -654,7 +689,11 @@ fn delete_directory_with_gui(
     if !progress_ui::should_show_progress_ui(total_items) {
         let result = delete_directory_internal(path, args, None, Some(tree));
         if let Err(error) = &result {
-            let _ = progress_ui::show_error_window(path.to_path_buf(), error_message(error));
+            let _ = progress_ui::show_error_window(
+                path.to_path_buf(),
+                error_message(error),
+                args.ui_lang,
+            );
         }
         return result;
     }
@@ -676,6 +715,8 @@ fn delete_directory_with_gui(
         gui: false,
         unlock: false,
         reset_confirm: false,
+        lang: args.lang,
+        ui_lang: args.ui_lang,
         confirmed: true,
     };
 
@@ -707,7 +748,7 @@ fn delete_directory_with_gui(
         result
     });
 
-    let _ = progress_ui::run_progress_window(progress.clone(), path.to_path_buf());
+    let _ = progress_ui::run_progress_window(progress.clone(), path.to_path_buf(), args.ui_lang);
 
     match delete_handle.join() {
         Ok(result) => result,
@@ -937,6 +978,90 @@ fn read_skip_confirm() -> bool {
     }
 }
 
+/// Resolves the interface language: the `--lang` value, then the settings key,
+/// then the language of the Windows interface.
+fn resolve_lang(choice: LangChoice) -> Lang {
+    match choice {
+        LangChoice::Zh => Lang::Zh,
+        LangChoice::En => Lang::En,
+        LangChoice::Auto => language_setting().unwrap_or_else(system_language),
+    }
+}
+
+/// The `Language` value of the settings key, when it holds a known code.
+#[cfg(windows)]
+fn language_setting() -> Option<Lang> {
+    read_language().and_then(|code| Lang::from_code(&code))
+}
+
+#[cfg(not(windows))]
+fn language_setting() -> Option<Lang> {
+    None
+}
+
+/// The language of the Windows interface. Languages rmx does not ship get
+/// English.
+#[cfg(windows)]
+fn system_language() -> Lang {
+    Lang::from_lcid(unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() })
+}
+
+#[cfg(not(windows))]
+fn system_language() -> Lang {
+    Lang::En
+}
+
+#[cfg(windows)]
+fn read_language() -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::*;
+    use windows::Win32::System::Registry::*;
+
+    let key_wide: Vec<u16> = SETTINGS_REG_KEY
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let value_wide: Vec<u16> = LANGUAGE_VALUE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        let result = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key_wide.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        );
+        if result != ERROR_SUCCESS {
+            return None;
+        }
+
+        let mut buffer = [0u16; 32];
+        let mut data_size = (buffer.len() * std::mem::size_of::<u16>()) as u32;
+        let mut value_type = REG_NONE;
+        let result = RegQueryValueExW(
+            hkey,
+            PCWSTR(value_wide.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buffer.as_mut_ptr() as *mut u8),
+            Some(&mut data_size),
+        );
+        let _ = RegCloseKey(hkey);
+
+        if result != ERROR_SUCCESS || value_type != REG_SZ {
+            return None;
+        }
+
+        let length = (data_size as usize / std::mem::size_of::<u16>()).min(buffer.len());
+        let code = String::from_utf16_lossy(&buffer[..length]);
+        Some(code.trim_end_matches('\0').to_string())
+    }
+}
+
 #[cfg(windows)]
 fn write_skip_confirm(skip: bool) {
     use windows::core::PCWSTR;
@@ -1072,7 +1197,7 @@ fn run_unlock(args: &Args) -> Result<(), Error> {
         if is_dir {
             #[cfg(windows)]
             if args.gui {
-                unlock_directory_gui(path)?;
+                unlock_directory_gui(path, args.ui_lang)?;
             } else {
                 unlock_directory(path, verbose)?;
             }
@@ -1082,7 +1207,7 @@ fn run_unlock(args: &Args) -> Result<(), Error> {
         } else {
             #[cfg(windows)]
             if args.gui {
-                unlock_single_file_gui(path)?;
+                unlock_single_file_gui(path, args.ui_lang)?;
             } else {
                 unlock_single_file(path, verbose)?;
             }
@@ -1096,7 +1221,7 @@ fn run_unlock(args: &Args) -> Result<(), Error> {
 }
 
 #[cfg(windows)]
-fn unlock_directory_gui(path: &Path) -> Result<(), Error> {
+fn unlock_directory_gui(path: &Path, lang: Lang) -> Result<(), Error> {
     let tree = tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
 
     let mut all_files: Vec<PathBuf> = Vec::new();
@@ -1140,13 +1265,13 @@ fn unlock_directory_gui(path: &Path) -> Result<(), Error> {
         full_path: path.to_path_buf(),
     }];
 
-    let _ = progress_ui::run_unlock_dialog(path.to_path_buf(), file_infos, all_locking_procs);
+    let _ = progress_ui::run_unlock_dialog(path.to_path_buf(), file_infos, all_locking_procs, lang);
 
     Ok(())
 }
 
 #[cfg(windows)]
-fn unlock_single_file_gui(path: &Path) -> Result<(), Error> {
+fn unlock_single_file_gui(path: &Path, lang: Lang) -> Result<(), Error> {
     let locking_processes = rmx::winapi::find_locking_processes(path).unwrap_or_default();
 
     let file_infos = vec![progress_ui::UnlockFileInfo {
@@ -1157,7 +1282,7 @@ fn unlock_single_file_gui(path: &Path) -> Result<(), Error> {
         full_path: path.to_path_buf(),
     }];
 
-    let _ = progress_ui::run_unlock_dialog(path.to_path_buf(), file_infos, locking_processes);
+    let _ = progress_ui::run_unlock_dialog(path.to_path_buf(), file_infos, locking_processes, lang);
 
     Ok(())
 }

@@ -15,6 +15,8 @@ use gpui_component::theme::Theme;
 use gpui_component::{ActiveTheme, IconName, Root, Sizable};
 use gpui_component_assets::Assets;
 
+use crate::i18n::{count, fill, plural, strings, Lang};
+
 const MIN_DISPLAY_DURATION: Duration = Duration::from_millis(800);
 const FAST_DELETE_THRESHOLD: usize = 50;
 
@@ -297,15 +299,17 @@ pub struct DeleteProgressWindow {
     path: PathBuf,
     window_opened_at: Instant,
     resized_for_errors: bool,
+    lang: Lang,
 }
 
 impl DeleteProgressWindow {
-    pub fn new(progress: Arc<DeleteProgress>, path: PathBuf) -> Self {
+    pub fn new(progress: Arc<DeleteProgress>, path: PathBuf, lang: Lang) -> Self {
         Self {
             progress,
             path,
             window_opened_at: Instant::now(),
             resized_for_errors: false,
+            lang,
         }
     }
 
@@ -373,20 +377,25 @@ impl Render for DeleteProgressWindow {
         let danger_color = theme.danger;
         let success_color = theme.success;
 
+        let s = strings(self.lang);
+
         let (icon_name, icon_color, title) = if is_complete && has_errors {
-            (IconName::TriangleAlert, danger_color, "删除完成（有错误）")
+            (IconName::TriangleAlert, danger_color, s.delete_complete_errors)
         } else if is_complete {
-            (IconName::CircleCheck, success_color, "删除完成")
+            (IconName::CircleCheck, success_color, s.delete_complete)
         } else {
-            (IconName::LoaderCircle, muted_fg, "正在删除...")
+            (IconName::LoaderCircle, muted_fg, s.deleting)
         };
 
         let status_text = if is_complete && has_errors {
-            format!("完成，{} 个错误", error_count)
+            count(s.done_error_one, s.done_errors_many, error_count)
         } else if is_complete {
-            "已完成".to_string()
+            s.completed.to_string()
         } else {
-            format!("已删除 {} / {} 个目录", deleted_dirs, total_dirs)
+            fill(
+                plural(s.deleted_dirs_one, s.deleted_dirs_many, total_dirs),
+                &[&deleted_dirs, &total_dirs],
+            )
         };
 
         let status_color = if is_complete && has_errors {
@@ -528,7 +537,7 @@ impl Render for DeleteProgressWindow {
                     this.child(
                         Button::new("copy-errors")
                             .ghost()
-                            .label("复制错误")
+                            .label(s.copy_errors)
                             .on_click(move |_, _, cx| {
                                 let text = errors_for_copy.join("\n");
                                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -538,14 +547,14 @@ impl Render for DeleteProgressWindow {
                 .child(if is_complete {
                     Button::new("close")
                         .primary()
-                        .label("关闭")
+                        .label(s.close)
                         .on_click(|_, _, cx| {
                             cx.quit();
                         })
                 } else {
                     Button::new("cancel")
                         .ghost()
-                        .label("取消")
+                        .label(s.cancel)
                         .on_click(move |_, _, cx| {
                             progress_clone.cancel();
                             cx.quit();
@@ -610,15 +619,23 @@ pub struct ConfirmDeleteWindow {
     total_files: usize,
     total_dirs: usize,
     state: Arc<ConfirmState>,
+    lang: Lang,
 }
 
 impl ConfirmDeleteWindow {
-    pub fn new(paths: Vec<PathBuf>, total_files: usize, total_dirs: usize, state: Arc<ConfirmState>) -> Self {
+    pub fn new(
+        paths: Vec<PathBuf>,
+        total_files: usize,
+        total_dirs: usize,
+        state: Arc<ConfirmState>,
+        lang: Lang,
+    ) -> Self {
         Self {
             paths,
             total_files,
             total_dirs,
             state,
+            lang,
         }
     }
 
@@ -632,20 +649,21 @@ impl ConfirmDeleteWindow {
     }
 
     fn format_item_summary(&self) -> String {
+        let s = strings(self.lang);
         if self.paths.len() > 1 {
-            return format!("已选择 {} 项", self.paths.len());
+            return fill(s.items_selected, &[&self.paths.len()]);
         }
         if self.total_dirs == 0 && self.total_files <= 1 {
-            return "1 个文件".to_string();
+            return s.files_one.to_string();
         }
         let mut parts = Vec::new();
         if self.total_files > 0 {
-            parts.push(format!("{} 个文件", self.total_files));
+            parts.push(count(s.files_one, s.files_many, self.total_files));
         }
         if self.total_dirs > 0 {
-            parts.push(format!("{} 个目录", self.total_dirs));
+            parts.push(count(s.dirs_one, s.dirs_many, self.total_dirs));
         }
-        parts.join("，")
+        parts.join(s.item_separator)
     }
 }
 
@@ -659,6 +677,7 @@ impl Render for ConfirmDeleteWindow {
         let path_display = self.format_path_display(&mut measurements);
         let item_summary = self.format_item_summary();
         let skip_checked = self.state.should_skip_next_confirm();
+        let s = strings(self.lang);
 
         let theme = cx.theme();
         let bg = theme.background;
@@ -708,13 +727,13 @@ impl Render for ConfirmDeleteWindow {
                                             .text_base()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(fg)
-                                            .child("确认删除"),
+                                            .child(s.confirm_deletion),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(muted_fg)
-                                            .child("此操作不可撤销，文件不会进入回收站"),
+                                            .child(s.confirm_warning),
                                     ),
                             ),
                     )
@@ -760,7 +779,7 @@ impl Render for ConfirmDeleteWindow {
                     .child(
                         gpui_component::checkbox::Checkbox::new("skip-confirm-checkbox")
                             .checked(skip_checked)
-                            .label("下次不再确认")
+                            .label(s.dont_ask_again)
                             .with_size(gpui_component::Size::Small)
                             .on_click(move |checked, _, _| {
                                 state_checkbox.set_skip_next_confirm(*checked);
@@ -775,7 +794,7 @@ impl Render for ConfirmDeleteWindow {
                             .child(
                                 Button::new("cancel-btn")
                                     .ghost()
-                                    .label("取消")
+                                    .label(s.cancel)
                                     .on_click(move |_, _, cx| {
                                         state_cancel.cancel();
                                         cx.quit();
@@ -784,7 +803,7 @@ impl Render for ConfirmDeleteWindow {
                             .child(
                                 Button::new("confirm-btn")
                                     .danger()
-                                    .label("删除")
+                                    .label(s.delete)
                                     .icon(IconName::Delete)
                                     .on_click(move |_, _, cx| {
                                         state.confirm();
@@ -813,6 +832,7 @@ pub fn run_confirmation_dialog(
     paths: Vec<PathBuf>,
     total_files: usize,
     total_dirs: usize,
+    lang: Lang,
 ) -> anyhow::Result<ConfirmResult> {
     let state = Arc::new(ConfirmState::new());
     let state_clone = state.clone();
@@ -829,7 +849,7 @@ pub fn run_confirmation_dialog(
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("确认删除".into()),
+                    title: Some(strings(lang).confirm_deletion.into()),
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
@@ -841,7 +861,7 @@ pub fn run_confirmation_dialog(
 
             cx.open_window(window_options, |window, cx| {
                 let view = cx.new(|_| {
-                    ConfirmDeleteWindow::new(paths_clone, total_files, total_dirs, state_inner)
+                    ConfirmDeleteWindow::new(paths_clone, total_files, total_dirs, state_inner, lang)
                 });
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
@@ -857,7 +877,11 @@ pub fn run_confirmation_dialog(
     })
 }
 
-pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyhow::Result<()> {
+pub fn run_progress_window(
+    progress: Arc<DeleteProgress>,
+    path: PathBuf,
+    lang: Lang,
+) -> anyhow::Result<()> {
     let app = Application::new().with_assets(Assets);
 
     app.run(move |cx| {
@@ -870,7 +894,7 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("删除进度".into()),
+                    title: Some(strings(lang).deletion_progress.into()),
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
@@ -881,7 +905,7 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
             };
 
             cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|_| DeleteProgressWindow::new(progress_clone, path_clone));
+                let view = cx.new(|_| DeleteProgressWindow::new(progress_clone, path_clone, lang));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
 
@@ -926,11 +950,11 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
 /// Used when no progress window was displayed at all: a single file or a
 /// directory with few items deletes silently, so a failure would otherwise be
 /// invisible (the process is started detached and has no console).
-pub fn show_error_window(path: PathBuf, message: String) -> anyhow::Result<()> {
+pub fn show_error_window(path: PathBuf, message: String, lang: Lang) -> anyhow::Result<()> {
     let progress = Arc::new(DeleteProgress::new(1, 0));
     progress.set_errors(vec![message]);
     progress.mark_complete();
-    run_progress_window(progress, path)
+    run_progress_window(progress, path, lang)
 }
 
 // ── Unlock mode UI (仿火绒风格) ─────────────────────────────────────────
@@ -961,12 +985,14 @@ pub struct UnlockProgressWindow {
     phase: UnlockPhase,
     confirm_signal: Arc<AtomicBool>,
     result: KillResult,
+    lang: Lang,
 }
 
 impl UnlockProgressWindow {
     pub fn new(
         files: Vec<UnlockFileInfo>,
         locking_processes: Vec<crate::winapi::LockingProcess>,
+        lang: Lang,
     ) -> Self {
         Self {
             files,
@@ -974,6 +1000,7 @@ impl UnlockProgressWindow {
             phase: UnlockPhase::Confirm,
             confirm_signal: Arc::new(AtomicBool::new(false)),
             result: Arc::new(parking_lot::Mutex::new(None)),
+            lang,
         }
     }
 
@@ -986,6 +1013,7 @@ impl UnlockProgressWindow {
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
         let border = theme.border;
+        let s = strings(self.lang);
 
         let mut table = div()
             .flex()
@@ -1012,7 +1040,7 @@ impl UnlockProgressWindow {
                         .text_xs()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(muted_fg)
-                        .child("名称"),
+                        .child(s.name),
                 )
                 .child(
                     div()
@@ -1020,7 +1048,7 @@ impl UnlockProgressWindow {
                         .text_xs()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(muted_fg)
-                        .child("路径"),
+                        .child(s.path),
                 ),
         );
 
@@ -1126,6 +1154,7 @@ impl Render for UnlockProgressWindow {
         let success_color = theme.success;
         let danger_color = theme.danger;
 
+        let s = strings(self.lang);
         let file_count = files.len();
 
         let mut content = div().flex().flex_col().size_full().bg(bg);
@@ -1134,12 +1163,12 @@ impl Render for UnlockProgressWindow {
         match &self.phase {
             UnlockPhase::Confirm => {
                 content = content.child(
-                    self.render_header(fg, muted_fg, "文件解锁", "帮助你解锁被其他进程占用的文件或文件夹", None),
+                    self.render_header(fg, muted_fg, s.unlock_files, s.unlock_help, None),
                 );
             }
             UnlockPhase::Working => {
                 content = content.child(
-                    self.render_header(fg, muted_fg, "正在解锁...", "正在终止占用进程", Some(muted_fg)),
+                    self.render_header(fg, muted_fg, s.unlocking, s.terminating_locking, Some(muted_fg)),
                 );
             }
             UnlockPhase::Success { killed } => {
@@ -1157,12 +1186,12 @@ impl Render for UnlockProgressWindow {
                                         )
                                         .child(
                                             div().text_base().font_weight(FontWeight::BOLD)
-                                                .text_color(fg).child("解锁成功"),
+                                                .text_color(fg).child(s.unlock_successful),
                                         ),
                                 )
                                 .child(
                                     div().text_xs().text_color(muted_fg)
-                                        .child(format!("已终止 {} 个占用进程", killed)),
+                                        .child(count(s.terminated_one, s.terminated_many, *killed)),
                                 ),
                         ),
                 );
@@ -1182,15 +1211,12 @@ impl Render for UnlockProgressWindow {
                                         )
                                         .child(
                                             div().text_base().font_weight(FontWeight::BOLD)
-                                                .text_color(fg).child("部分解锁失败"),
+                                                .text_color(fg).child(s.some_unlocks_failed),
                                         ),
                                 )
                                 .child(
                                     div().text_xs().text_color(muted_fg)
-                                        .child(format!(
-                                            "成功 {} 个，失败 {} 个",
-                                            killed, failures.len()
-                                        )),
+                                        .child(fill(s.succeeded_failed, &[&killed, &failures.len()])),
                                 ),
                         ),
                 );
@@ -1201,7 +1227,11 @@ impl Render for UnlockProgressWindow {
         if matches!(self.phase, UnlockPhase::Confirm | UnlockPhase::Working) {
             content = content.child(
                 div().px_4().py_1().text_xs().text_color(muted_fg)
-                    .child(format!("将对以下 {} 个文件/文件夹进行解锁", file_count)),
+                    .child(count(
+                        s.unlock_following_one,
+                        s.unlock_following_many,
+                        file_count,
+                    )),
             );
 
             let mut file_list = div()
@@ -1212,11 +1242,11 @@ impl Render for UnlockProgressWindow {
             file_list = file_list.child(
                 div().flex().flex_row().items_center().px_3().py_1p5()
                     .bg(theme.secondary.opacity(0.3)).border_b_1().border_color(border)
-                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted_fg).child("文件/文件夹名称"))
-                    .child(div().w(px(60.0)).text_xs().font_weight(FontWeight::MEDIUM).text_color(muted_fg).text_right().child("状态")),
+                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted_fg).child(s.file_folder_name))
+                    .child(div().w(px(60.0)).text_xs().font_weight(FontWeight::MEDIUM).text_color(muted_fg).text_right().child(s.status)),
             );
 
-            let status_text = if matches!(self.phase, UnlockPhase::Working) { "解锁中" } else { "待解锁" };
+            let status_text = if matches!(self.phase, UnlockPhase::Working) { s.status_unlocking } else { s.status_pending };
             for file in files {
                 file_list = file_list.child(
                     div().flex().flex_row().items_center().px_3().py_1p5()
@@ -1235,7 +1265,7 @@ impl Render for UnlockProgressWindow {
             content = content.child(
                 div().flex().flex_col().gap_1().px_4().pt_3()
                     .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(fg)
-                        .child(format!("{} 被以下程序锁定", first_file_name)))
+                        .child(fill(s.locked_by, &[&first_file_name])))
                     .child(self.render_process_table(&processes, theme, &mut measurements)),
             );
         }
@@ -1250,8 +1280,8 @@ impl Render for UnlockProgressWindow {
             fail_list = fail_list.child(
                 div().flex().flex_row().items_center().px_3().py_1p5()
                     .bg(danger_color.opacity(0.08)).border_b_1().border_color(danger_color.opacity(0.2))
-                    .child(div().w(px(120.0)).text_xs().font_weight(FontWeight::MEDIUM).text_color(danger_color).child("进程"))
-                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(danger_color).child("失败原因")),
+                    .child(div().w(px(120.0)).text_xs().font_weight(FontWeight::MEDIUM).text_color(danger_color).child(s.process))
+                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(danger_color).child(s.reason)),
             );
 
             for f in failures {
@@ -1273,29 +1303,29 @@ impl Render for UnlockProgressWindow {
                 .when(matches!(self.phase, UnlockPhase::Confirm), |this| {
                     let signal = self.confirm_signal.clone();
                     this.child(
-                        Button::new("unlock-btn").primary().label("全部解锁")
+                        Button::new("unlock-btn").primary().label(s.unlock_all)
                             .on_click(move |_, _, cx| {
                                 signal.store(true, Ordering::Release);
                                 cx.refresh_windows();
                             }),
                     )
                     .child(
-                        Button::new("cancel-btn").ghost().label("取消")
+                        Button::new("cancel-btn").ghost().label(s.cancel)
                             .on_click(|_, _, cx| { cx.quit(); }),
                     )
                 })
                 .when(matches!(self.phase, UnlockPhase::Working), |this| {
-                    this.child(div().text_xs().text_color(muted_fg).child("正在处理，请稍候..."))
+                    this.child(div().text_xs().text_color(muted_fg).child(s.processing))
                 })
                 .when(matches!(self.phase, UnlockPhase::Success { .. }), |this| {
                     this.child(
-                        Button::new("close-btn-ok").primary().label("好的")
+                        Button::new("close-btn-ok").primary().label(s.ok)
                             .on_click(|_, _, cx| { cx.quit(); }),
                     )
                 })
                 .when(matches!(self.phase, UnlockPhase::Failed { .. }), |this| {
                     this.child(
-                        Button::new("close-btn").primary().label("关闭")
+                        Button::new("close-btn").primary().label(s.close)
                             .on_click(|_, _, cx| { cx.quit(); }),
                     )
                 }),
@@ -1348,11 +1378,12 @@ impl UnlockProgressWindow {
 
 pub struct NoLockWindow {
     _path: PathBuf,
+    lang: Lang,
 }
 
 impl NoLockWindow {
-    pub fn new(path: PathBuf) -> Self {
-        Self { _path: path }
+    pub fn new(path: PathBuf, lang: Lang) -> Self {
+        Self { _path: path, lang }
     }
 }
 
@@ -1363,6 +1394,7 @@ impl Render for NoLockWindow {
         let fg = theme.foreground;
         let border = theme.border;
         let warning_color = theme.warning;
+        let s = strings(self.lang);
 
         div()
             .flex()
@@ -1399,7 +1431,7 @@ impl Render for NoLockWindow {
                         div()
                             .text_sm()
                             .text_color(fg)
-                            .child("未检测到文件被占用，无需解锁"),
+                            .child(s.no_locked_files),
                     ),
             )
             .child(
@@ -1416,7 +1448,7 @@ impl Render for NoLockWindow {
                     .child(
                         Button::new("ok-btn")
                             .primary()
-                            .label("好的")
+                            .label(s.ok)
                             .on_click(|_, _, cx| {
                                 cx.quit();
                             }),
@@ -1429,6 +1461,7 @@ pub fn run_unlock_dialog(
     path: PathBuf,
     files: Vec<UnlockFileInfo>,
     locking_processes: Vec<crate::winapi::LockingProcess>,
+    lang: Lang,
 ) -> anyhow::Result<()> {
     let app = Application::new().with_assets(Assets);
 
@@ -1443,7 +1476,7 @@ pub fn run_unlock_dialog(
             cx.spawn(async move |cx| {
                 let window_options = WindowOptions {
                     titlebar: Some(TitlebarOptions {
-                        title: Some("文件解锁".into()),
+                        title: Some(strings(lang).unlock_files.into()),
                         ..Default::default()
                     }),
                     window_bounds: Some(WindowBounds::Windowed(window_bounds)),
@@ -1454,7 +1487,7 @@ pub fn run_unlock_dialog(
                 };
 
                 cx.open_window(window_options, |window, cx| {
-                    let view = cx.new(|_| NoLockWindow::new(path_clone));
+                    let view = cx.new(|_| NoLockWindow::new(path_clone, lang));
                     cx.new(|cx| Root::new(view, window, cx))
                 })?;
 
@@ -1477,7 +1510,7 @@ pub fn run_unlock_dialog(
             cx.spawn(async move |cx| {
                 let window_options = WindowOptions {
                     titlebar: Some(TitlebarOptions {
-                        title: Some("文件解锁".into()),
+                        title: Some(strings(lang).unlock_files.into()),
                         ..Default::default()
                     }),
                     window_bounds: Some(WindowBounds::Windowed(window_bounds)),
@@ -1489,7 +1522,7 @@ pub fn run_unlock_dialog(
 
                 cx.open_window(window_options, |window, cx| {
                     let view = cx.new(|_| {
-                        UnlockProgressWindow::new(files, procs_clone)
+                        UnlockProgressWindow::new(files, procs_clone, lang)
                     });
                     cx.new(|cx| Root::new(view, window, cx))
                 })?;

@@ -2,6 +2,7 @@ pub mod broker;
 #[cfg(windows)]
 pub mod context_menu;
 pub mod error;
+pub mod i18n;
 #[cfg(windows)]
 pub mod progress_ui;
 pub mod safety;

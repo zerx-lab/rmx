@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 mod com;
+mod lang;
 mod menu;
 mod registry;
 

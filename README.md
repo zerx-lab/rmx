@@ -202,6 +202,32 @@ After initialization, right-click any file or folder to see "Delete with rmx" op
 
 **Note:** Run PowerShell or CMD as Administrator for the init command.
 
+### Interface Language
+
+The progress, confirmation, error and unlock windows and the Explorer menu follow
+the interface language:
+
+```bash
+# Use English
+rmx --gui --lang en -r ./node_modules
+
+# Use Chinese
+rmx --gui --lang zh -r ./node_modules
+
+# Follow the Windows interface language (default)
+rmx --gui --lang auto -r ./node_modules
+```
+
+With `auto`, a Chinese Windows shows Chinese and every other language shows
+English. The `Language` value in `HKCU\Software\rmx\Settings` applies when the
+flag is `auto`, and the flag overrides it:
+
+```powershell
+reg add "HKCU\Software\rmx\Settings" /v Language /t REG_SZ /d en /f
+```
+
+The command line output stays English in every language.
+
 ## ⚙️ Options
 
 | Option | Description |
@@ -215,6 +241,7 @@ After initialization, right-click any file or folder to see "Delete with rmx" op
 | `--no-preserve-root` | Do not treat '/' specially |
 | `--kill-processes` | Terminate processes locking files/directories, then delete them |
 | `--unlock` | Only unlock files/directories (close handles) without deleting |
+| `--lang <LANG>` | Interface language: `zh`, `en` or `auto` (the Windows UI language, default) |
 
 ### Subcommands
 
