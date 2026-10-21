@@ -102,6 +102,10 @@ struct Args {
         help = "Reset skip-confirmation setting, restore delete confirmation dialog"
     )]
     reset_confirm: bool,
+
+    /// Set after one confirmation dialog was shown for a multi-path selection.
+    #[arg(skip)]
+    confirmed: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -223,7 +227,31 @@ fn run_command(command: Command) -> Result<(), std::io::Error> {
     }
 }
 
-fn run(args: Args) -> Result<(), Error> {
+fn run(mut args: Args) -> Result<(), Error> {
+    // One dialog for a multi-path selection instead of one dialog per path.
+    #[cfg(windows)]
+    if args.gui && !args.force && args.paths.len() > 1 && !read_skip_confirm() {
+        let result = progress_ui::run_confirmation_dialog(
+            args.paths.clone(),
+            args.paths.len(),
+            0,
+        )
+        .unwrap_or(progress_ui::ConfirmResult {
+            confirmed: false,
+            skip_next_confirm: false,
+        });
+
+        if result.confirmed && result.skip_next_confirm {
+            write_skip_confirm(true);
+        }
+
+        if !result.confirmed {
+            return Ok(());
+        }
+
+        args.confirmed = true;
+    }
+
     let mut total_stats = DeletionStats::default();
     let mut all_failures = Vec::new();
     let mut failed_paths = Vec::new();
@@ -352,6 +380,18 @@ fn process_path(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     }
 }
 
+/// Formats a deletion error the way the progress window shows it.
+#[cfg(windows)]
+fn error_message(error: &Error) -> String {
+    match error {
+        Error::PartialFailure { errors, .. } => match errors.first() {
+            Some(first) => format!("{}: {}", first.path.display(), first.error),
+            None => error.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
 fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
     if args.dry_run {
         if args.verbose {
@@ -363,11 +403,11 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         });
     }
 
-    if !args.force {
+    if !args.force && !args.confirmed {
         #[cfg(windows)]
         if args.gui {
             if !read_skip_confirm() {
-                let result = progress_ui::run_confirmation_dialog(path.to_path_buf(), 1, 0)
+                let result = progress_ui::run_confirmation_dialog(vec![path.to_path_buf()], 1, 0)
                     .unwrap_or(progress_ui::ConfirmResult {
                         confirmed: false,
                         skip_next_confirm: false,
@@ -407,7 +447,12 @@ fn process_file(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
             }
         }
         Err(e) => {
-            return Err(Error::io_with_path(path.to_path_buf(), e));
+            let error = Error::io_with_path(path.to_path_buf(), e);
+            #[cfg(windows)]
+            if args.gui {
+                let _ = progress_ui::show_error_window(path.to_path_buf(), error_message(&error));
+            }
+            return Err(error);
         }
     }
 
@@ -494,7 +539,7 @@ fn process_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         return dry_run_directory(path, args);
     }
 
-    if !args.force {
+    if !args.force && !args.confirmed {
         let tree =
             tree::discover_tree(path).map_err(|e| Error::io_with_path(path.to_path_buf(), e))?;
         let dir_count = tree.dirs.len();
@@ -503,8 +548,11 @@ fn process_directory(path: &Path, args: &Args) -> Result<DeletionStats, Error> {
         #[cfg(windows)]
         if args.gui {
             if !read_skip_confirm() {
-                let result =
-                    progress_ui::run_confirmation_dialog(path.to_path_buf(), file_count, dir_count)
+                let result = progress_ui::run_confirmation_dialog(
+                    vec![path.to_path_buf()],
+                    file_count,
+                    dir_count,
+                )
                         .unwrap_or(progress_ui::ConfirmResult {
                             confirmed: false,
                             skip_next_confirm: false,
@@ -604,7 +652,11 @@ fn delete_directory_with_gui(
     let total_items = tree.file_count + tree.dirs.len();
 
     if !progress_ui::should_show_progress_ui(total_items) {
-        return delete_directory_internal(path, args, None, Some(tree));
+        let result = delete_directory_internal(path, args, None, Some(tree));
+        if let Err(error) = &result {
+            let _ = progress_ui::show_error_window(path.to_path_buf(), error_message(error));
+        }
+        return result;
     }
 
     let progress = Arc::new(DeleteProgress::new(tree.file_count, tree.dirs.len()));
@@ -624,6 +676,7 @@ fn delete_directory_with_gui(
         gui: false,
         unlock: false,
         reset_confirm: false,
+        confirmed: true,
     };
 
     let delete_handle = thread::spawn(move || {

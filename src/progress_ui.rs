@@ -1,6 +1,7 @@
 #![allow(clippy::duplicated_attributes)]
 #![cfg(windows)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -10,41 +11,205 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
+use gpui_component::theme::Theme;
 use gpui_component::{ActiveTheme, IconName, Root, Sizable};
 use gpui_component_assets::Assets;
 
 const MIN_DISPLAY_DURATION: Duration = Duration::from_millis(800);
 const FAST_DELETE_THRESHOLD: usize = 50;
 
-/// Maximum number of characters shown for a path in the UI ("..." + tail).
-const PATH_DISPLAY_MAX_CHARS: usize = 45;
-/// Maximum number of characters shown for the line with the current item.
-const CURRENT_ITEM_MAX_CHARS: usize = 50;
-/// Maximum number of characters shown for an error message ("..." + head).
-const ERROR_DISPLAY_MAX_CHARS: usize = 70;
+/// Widths of the fields that show paths, in logical pixels (the windows are
+/// 560 px wide). Used as a budget for the text that has to fit them.
+const PATH_LINE_WIDTH: f32 = 440.0; // progress window: path line under the title
+const DIALOG_PATH_WIDTH: f32 = 470.0; // confirm dialog: path box
+const CELL_WIDTH: f32 = 380.0; // unlock window: table cells
+/// Width of the error box in logical pixels, and how many lines the error text
+/// may occupy. Longer messages are cut in the middle, so the start of the path
+/// and the reason at its end stay visible; the full text is always available
+/// through the Copy errors button.
+const ERROR_LINE_WIDTH: f32 = 500.0;
+const ERROR_MAX_LINES: usize = 5;
+/// How often a message is cut shorter when it still wraps into too many lines
+/// (a wrapped line ends at the last separator, not at the very edge).
+const ERROR_FIT_ATTEMPTS: usize = 4;
 
-/// Shortens `text` to `max_chars` characters at most, keeping the tail.
+
+/// Measures text the way gpui paints it.
 ///
-/// Counting characters instead of bytes keeps the visible length the same for
-/// Latin and multi-byte text: a Cyrillic path is no longer cut twice as early
-/// as a Latin one.
-fn truncate_tail(text: &str, max_chars: usize) -> String {
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_string();
-    }
-    let tail: String = text.chars().skip(count - (max_chars - 3)).collect();
-    format!("...{}", tail)
+/// The windows draw 12 px text (`text_xs` = 0.75 rem) and a width estimated per
+/// character from a constant is off by tens of percent: wrapped lines then end
+/// far from the right edge of their box. Every character is measured once with
+/// the text system and cached, so the layout matches the painted text.
+struct TextMeasurements {
+    text_system: Arc<WindowTextSystem>,
+    text_style: TextStyle,
+    font_size: Pixels,
+    line_height: Pixels,
+    char_widths: HashMap<char, Pixels>,
 }
 
-/// Shortens `text` to `max_chars` characters at most, keeping the head.
-fn truncate_head(text: &str, max_chars: usize) -> String {
-    let count = text.chars().count();
-    if count <= max_chars {
+impl TextMeasurements {
+    fn new(text_system: Arc<WindowTextSystem>, theme: &Theme, rem_size: Pixels) -> Self {
+        let text_style = TextStyle {
+            font_family: theme.font_family.clone(),
+            font_size: rems(0.75).into(),
+            ..Default::default()
+        };
+        let font_size = text_style.font_size.to_pixels(rem_size);
+        let line_height = text_style.line_height_in_pixels(rem_size);
+
+        Self {
+            text_system,
+            text_style,
+            font_size,
+            line_height,
+            char_widths: HashMap::new(),
+        }
+    }
+
+    /// The height of one line of this text, which is how much the error box
+    /// grows for every extra line.
+    fn line_height(&self) -> Pixels {
+        self.line_height
+    }
+
+    fn char_width(&mut self, character: char) -> Pixels {
+        if let Some(width) = self.char_widths.get(&character) {
+            return *width;
+        }
+
+        let mut buffer = [0; 4];
+        let text = character.encode_utf8(&mut buffer);
+        let run = self.text_style.to_run(text.len());
+        let width = self
+            .text_system
+            .layout_line(text, self.font_size, &[run], None)
+            .width;
+        self.char_widths.insert(character, width);
+        width
+    }
+
+    fn width(&mut self, text: &str) -> Pixels {
+        text.chars()
+            .map(|character| self.char_width(character))
+            .sum()
+    }
+}
+
+
+/// Shortens `text` so that it fits `max_width` pixels, cutting the middle out.
+///
+/// The middle is replaced with "...". This keeps both the start of a path and
+/// the file name or error reason at its end readable, and the line fills its
+/// field instead of stopping half way.
+fn fit_middle(text: &str, max_width: Pixels, measurements: &mut TextMeasurements) -> String {
+    if measurements.width(text) <= max_width {
         return text.to_string();
     }
-    let head: String = text.chars().take(max_chars - 3).collect();
-    format!("{}...", head)
+
+    let ellipsis = "...";
+    let budget = max_width - measurements.width(ellipsis);
+    if budget <= px(0.0) {
+        return ellipsis.to_string();
+    }
+    let side = budget * 0.5;
+
+    let mut head_end = 0;
+    let mut head_width = px(0.0);
+    for (index, character) in text.char_indices() {
+        let width = measurements.char_width(character);
+        if head_width + width > side {
+            break;
+        }
+        head_width += width;
+        head_end = index + character.len_utf8();
+    }
+
+    let mut tail_start = text.len();
+    let mut tail_width = px(0.0);
+    for (index, character) in text.char_indices().rev() {
+        if index < head_end {
+            break;
+        }
+        let width = measurements.char_width(character);
+        if tail_width + width > side {
+            break;
+        }
+        tail_width += width;
+        tail_start = index;
+    }
+
+    format!("{}{}{}", &text[..head_end], ellipsis, &text[tail_start..])
+}
+
+/// Wraps `text` into lines of at most `max_width` pixels.
+///
+/// gpui counts `.`, `-` and `_` as word characters, so a path such as
+/// `target.txttarget.txt` is a single word and the built-in wrapper breaks it
+/// only at separators like `\`, which leaves large gaps at the end of a line.
+/// Here the break is preferred right after a separator, so paths and words stay
+/// readable; a run without separators is broken anywhere instead of leaving a
+/// gap.
+fn wrap_to_width(text: &str, max_width: Pixels, measurements: &mut TextMeasurements) -> String {
+    const SEPARATORS: &[char] = &[' ', '\\', '/', '.', '-', '_', ':', ','];
+
+    let mut wrapped = String::with_capacity(text.len() + text.len() / 40);
+    let mut line = String::new();
+    let mut line_width = px(0.0);
+    let mut last_separator: Option<usize> = None;
+
+    for character in text.chars() {
+        let width = measurements.char_width(character);
+        if !line.is_empty() && line_width + width > max_width {
+            match last_separator {
+                Some(index) if index < line.len() => {
+                    let rest = line.split_off(index);
+                    wrapped.push_str(&line);
+                    wrapped.push('\n');
+                    line_width = measurements.width(&rest);
+                    line = rest;
+                }
+                _ => {
+                    wrapped.push_str(&line);
+                    wrapped.push('\n');
+                    line.clear();
+                    line_width = px(0.0);
+                }
+            }
+            last_separator = None;
+        }
+
+        line.push(character);
+        line_width += width;
+        if SEPARATORS.contains(&character) {
+            last_separator = Some(line.len());
+        }
+    }
+
+    wrapped.push_str(&line);
+    wrapped
+}
+
+/// Fits an error message into the error box, cutting the middle out when needed.
+///
+/// A wrapped line ends at the last separator rather than at the very edge, so a
+/// message that fills the budget may still wrap into one line too many: such a
+/// message is cut shorter and wrapped again.
+fn fit_error(error: &str, measurements: &mut TextMeasurements) -> String {
+    let line_width = px(ERROR_LINE_WIDTH);
+    let mut budget = line_width * ERROR_MAX_LINES as f32;
+    let mut wrapped = String::new();
+
+    for _ in 0..ERROR_FIT_ATTEMPTS {
+        let fitted = fit_middle(error, budget, measurements);
+        wrapped = wrap_to_width(&fitted, line_width, measurements);
+        if wrapped.matches('\n').count() < ERROR_MAX_LINES {
+            break;
+        }
+        budget *= 0.85;
+    }
+
+    wrapped
 }
 
 pub struct DeleteProgress {
@@ -144,8 +309,8 @@ impl DeleteProgressWindow {
         }
     }
 
-    fn format_path_display(&self) -> String {
-        truncate_tail(&self.path.display().to_string(), PATH_DISPLAY_MAX_CHARS)
+    fn format_path_display(&self, measurements: &mut TextMeasurements) -> String {
+        fit_middle(&self.path.display().to_string(), px(PATH_LINE_WIDTH), measurements)
     }
 
     fn should_auto_close(&self) -> bool {
@@ -164,9 +329,31 @@ impl Render for DeleteProgressWindow {
         let error_count = self.progress.get_error_count();
         let has_errors = error_count > 0;
 
-        if is_complete && has_errors && !self.resized_for_errors {
-            self.resized_for_errors = true;
-            window.resize(size(px(420.0), px(270.0)));
+        let mut measurements =
+            TextMeasurements::new(window.text_system().clone(), cx.theme(), window.rem_size());
+
+        let display_error = if is_complete && has_errors {
+            self.progress
+                .get_first_error()
+                .map(|error| fit_error(&error, &mut measurements))
+        } else {
+            None
+        };
+        let error_lines = display_error
+            .as_ref()
+            .map(|error| error.matches('\n').count() + 1);
+        let error_line_height = measurements.line_height();
+        let current_display = fit_middle(&current_item, px(PATH_LINE_WIDTH), &mut measurements);
+        let path_display = self.format_path_display(&mut measurements);
+
+        if let Some(lines) = error_lines {
+            if !self.resized_for_errors {
+                self.resized_for_errors = true;
+                // The error box is wrapped here, so let the window grow with it.
+                window.resize(
+                    size(px(560.0), px(270.0) + error_line_height * lines.saturating_sub(1) as f32),
+                );
+            }
         }
 
         if self.should_auto_close() && !has_errors {
@@ -177,8 +364,6 @@ impl Render for DeleteProgressWindow {
             })
             .detach();
         }
-
-        let current_display = truncate_tail(&current_item, CURRENT_ITEM_MAX_CHARS);
 
         let theme = cx.theme();
         let bg = theme.background;
@@ -277,7 +462,7 @@ impl Render for DeleteProgressWindow {
                                             .text_color(muted_fg)
                                             .whitespace_nowrap()
                                             .overflow_hidden()
-                                            .child(self.format_path_display()),
+                                            .child(path_display),
                                     ),
                             ),
                     )
@@ -311,24 +496,20 @@ impl Render for DeleteProgressWindow {
                     ),
             );
 
-        if is_complete && has_errors {
-            if let Some(error_msg) = self.progress.get_first_error() {
-                let display_error = truncate_head(&error_msg, ERROR_DISPLAY_MAX_CHARS);
-                content = content.child(
-                    div()
-                        .mx_4()
-                        .mb_2()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(danger_color.opacity(0.08))
-                        .text_xs()
-                        .text_color(danger_color)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(display_error),
-                );
-            }
+        if let Some(display_error) = display_error {
+            content = content.child(
+                div()
+                    .mx_4()
+                    .mb_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(danger_color.opacity(0.08))
+                    .text_xs()
+                    .text_color(danger_color)
+                    .overflow_hidden()
+                    .child(display_error),
+            );
         }
 
         content.child(
@@ -425,27 +606,35 @@ impl ConfirmState {
 }
 
 pub struct ConfirmDeleteWindow {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     total_files: usize,
     total_dirs: usize,
     state: Arc<ConfirmState>,
 }
 
 impl ConfirmDeleteWindow {
-    pub fn new(path: PathBuf, total_files: usize, total_dirs: usize, state: Arc<ConfirmState>) -> Self {
+    pub fn new(paths: Vec<PathBuf>, total_files: usize, total_dirs: usize, state: Arc<ConfirmState>) -> Self {
         Self {
-            path,
+            paths,
             total_files,
             total_dirs,
             state,
         }
     }
 
-    fn format_path_display(&self) -> String {
-        truncate_tail(&self.path.display().to_string(), PATH_DISPLAY_MAX_CHARS)
+    fn format_path_display(&self, measurements: &mut TextMeasurements) -> String {
+        let first = self
+            .paths
+            .first()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        fit_middle(&first, px(DIALOG_PATH_WIDTH), measurements)
     }
 
     fn format_item_summary(&self) -> String {
+        if self.paths.len() > 1 {
+            return format!("已选择 {} 项", self.paths.len());
+        }
         if self.total_dirs == 0 && self.total_files <= 1 {
             return "1 个文件".to_string();
         }
@@ -465,7 +654,9 @@ impl Render for ConfirmDeleteWindow {
         let state = self.state.clone();
         let state_cancel = self.state.clone();
         let state_checkbox = self.state.clone();
-        let path_display = self.format_path_display();
+        let mut measurements =
+            TextMeasurements::new(_window.text_system().clone(), cx.theme(), _window.rem_size());
+        let path_display = self.format_path_display(&mut measurements);
         let item_summary = self.format_item_summary();
         let skip_checked = self.state.should_skip_next_confirm();
 
@@ -619,7 +810,7 @@ pub struct ConfirmResult {
 /// - `Ok(ConfirmResult)` with confirmation and skip_confirm state
 /// - `Err` if dialog failed to launch
 pub fn run_confirmation_dialog(
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     total_files: usize,
     total_dirs: usize,
 ) -> anyhow::Result<ConfirmResult> {
@@ -632,8 +823,8 @@ pub fn run_confirmation_dialog(
         gpui_component::init(cx);
 
         let state_inner = state_clone.clone();
-        let path_clone = path.clone();
-        let window_bounds = Bounds::centered(None, size(px(420.0), px(210.0)), cx);
+        let paths_clone = paths.clone();
+        let window_bounds = Bounds::centered(None, size(px(560.0), px(210.0)), cx);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
@@ -642,7 +833,7 @@ pub fn run_confirmation_dialog(
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-                window_min_size: Some(size(px(320.0), px(180.0))),
+                window_min_size: Some(size(px(420.0), px(180.0))),
                 kind: WindowKind::PopUp,
                 is_movable: true,
                 ..Default::default()
@@ -650,7 +841,7 @@ pub fn run_confirmation_dialog(
 
             cx.open_window(window_options, |window, cx| {
                 let view = cx.new(|_| {
-                    ConfirmDeleteWindow::new(path_clone, total_files, total_dirs, state_inner)
+                    ConfirmDeleteWindow::new(paths_clone, total_files, total_dirs, state_inner)
                 });
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
@@ -674,7 +865,7 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
 
         let progress_clone = progress.clone();
         let path_clone = path.clone();
-        let window_bounds = Bounds::centered(None, size(px(420.0), px(200.0)), cx);
+        let window_bounds = Bounds::centered(None, size(px(560.0), px(200.0)), cx);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
@@ -683,7 +874,7 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-                window_min_size: Some(size(px(320.0), px(180.0))),
+                window_min_size: Some(size(px(420.0), px(180.0))),
                 kind: WindowKind::PopUp,
                 is_movable: true,
                 ..Default::default()
@@ -730,6 +921,18 @@ pub fn run_progress_window(progress: Arc<DeleteProgress>, path: PathBuf) -> anyh
     Ok(())
 }
 
+/// Shows the progress window in its error state.
+///
+/// Used when no progress window was displayed at all: a single file or a
+/// directory with few items deletes silently, so a failure would otherwise be
+/// invisible (the process is started detached and has no console).
+pub fn show_error_window(path: PathBuf, message: String) -> anyhow::Result<()> {
+    let progress = Arc::new(DeleteProgress::new(1, 0));
+    progress.set_errors(vec![message]);
+    progress.mark_complete();
+    run_progress_window(progress, path)
+}
+
 // ── Unlock mode UI (仿火绒风格) ─────────────────────────────────────────
 
 pub struct UnlockFileInfo {
@@ -774,14 +977,11 @@ impl UnlockProgressWindow {
         }
     }
 
-    fn truncate_path(path: &str, max_len: usize) -> String {
-        truncate_tail(path, max_len)
-    }
-
     fn render_process_table(
         &self,
         processes: &[crate::winapi::LockingProcess],
-        theme: &gpui_component::theme::Theme,
+        theme: &Theme,
+        measurements: &mut TextMeasurements,
     ) -> Div {
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
@@ -828,7 +1028,7 @@ impl UnlockProgressWindow {
             let exe_display = proc
                 .exe_path
                 .as_deref()
-                .map(|p| Self::truncate_path(p, 45))
+                .map(|p| fit_middle(p, px(CELL_WIDTH), measurements))
                 .unwrap_or_else(|| format!("PID: {}", proc.pid));
 
             table = table.child(
@@ -907,7 +1107,7 @@ impl Render for UnlockProgressWindow {
                     self.phase = UnlockPhase::Success { killed };
                 } else {
                     self.phase = UnlockPhase::Failed { killed, failures };
-                    window.resize(size(px(520.0), px(380.0)));
+                    window.resize(size(px(560.0), px(380.0)));
                 }
             }
         }
@@ -916,6 +1116,8 @@ impl Render for UnlockProgressWindow {
         let files = &self.files;
 
         let theme = cx.theme();
+        let mut measurements =
+            TextMeasurements::new(window.text_system().clone(), theme, window.rem_size());
         let bg = theme.background;
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
@@ -1034,7 +1236,7 @@ impl Render for UnlockProgressWindow {
                 div().flex().flex_col().gap_1().px_4().pt_3()
                     .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(fg)
                         .child(format!("{} 被以下程序锁定", first_file_name)))
-                    .child(self.render_process_table(&processes, theme)),
+                    .child(self.render_process_table(&processes, theme, &mut measurements)),
             );
         }
 
@@ -1270,7 +1472,7 @@ pub fn run_unlock_dialog(
                 520,
                 base_height + file_rows_height + proc_rows_height,
             ) as f32;
-            let window_bounds = Bounds::centered(None, size(px(520.0), px(window_height)), cx);
+            let window_bounds = Bounds::centered(None, size(px(560.0), px(window_height)), cx);
 
             cx.spawn(async move |cx| {
                 let window_options = WindowOptions {
