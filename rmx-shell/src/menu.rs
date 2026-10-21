@@ -15,12 +15,16 @@ use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const MENU_DELETE_TEXT: PCWSTR = w!("Delete with rmx");
-const MENU_UNLOCK_TEXT: PCWSTR = w!("Unlock with rmx");
+const MENU_SUBMENU_TEXT: PCWSTR = w!("Delete with rmx");
+const MENU_DELETE_TEXT: PCWSTR = w!("Delete");
+const MENU_DELETE_NO_KILL_TEXT: PCWSTR = w!("Delete (no process kill)");
+const MENU_UNLOCK_TEXT: PCWSTR = w!("Unlock");
 const VERB_DELETE: &str = "rmxdelete";
+const VERB_DELETE_NO_KILL: &str = "rmxdeletenokill";
 const VERB_UNLOCK: &str = "rmxunlock";
 const CMD_ID_DELETE: u32 = 0;
-const CMD_ID_UNLOCK: u32 = 1;
+const CMD_ID_DELETE_NO_KILL: u32 = 1;
+const CMD_ID_UNLOCK: u32 = 2;
 /// The menu is built for the target of a shortcut, not for the shortcut itself.
 const CMF_VERBSONLY: u32 = 0x00000002;
 
@@ -99,24 +103,41 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
         }
 
         unsafe {
+            let submenu = CreatePopupMenu()?;
             InsertMenuW(
-                hmenu,
-                indexmenu,
+                submenu,
+                0,
                 MF_STRING | MF_BYPOSITION,
                 (idcmdfirst + CMD_ID_DELETE) as usize,
                 MENU_DELETE_TEXT,
             )?;
             InsertMenuW(
-                hmenu,
-                indexmenu + 1,
+                submenu,
+                1,
+                MF_STRING | MF_BYPOSITION,
+                (idcmdfirst + CMD_ID_DELETE_NO_KILL) as usize,
+                MENU_DELETE_NO_KILL_TEXT,
+            )?;
+            InsertMenuW(
+                submenu,
+                2,
                 MF_STRING | MF_BYPOSITION,
                 (idcmdfirst + CMD_ID_UNLOCK) as usize,
                 MENU_UNLOCK_TEXT,
             )?;
+            InsertMenuW(
+                hmenu,
+                indexmenu,
+                MF_STRING | MF_BYPOSITION | MF_POPUP,
+                submenu.0 as usize,
+                MENU_SUBMENU_TEXT,
+            )?;
         }
 
-        // Return item count = 2 (two menu items added)
-        Err(Error::from(HRESULT(2)))
+        // The submenu holds three items, so three ids are taken from the range
+        // Explorer gave us. The count must match them: with 2 the clicks on the
+        // items fall through to Explorer's own commands.
+        Err(Error::from(HRESULT(3)))
     }
 
     fn InvokeCommand(&self, pici: *const CMINVOKECOMMANDINFO) -> windows::core::Result<()> {
@@ -133,12 +154,14 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
             };
             match verb {
                 v if v == VERB_DELETE => MenuAction::Delete,
+                v if v == VERB_DELETE_NO_KILL => MenuAction::DeleteNoKill,
                 v if v == VERB_UNLOCK => MenuAction::Unlock,
                 _ => return Err(E_INVALIDARG.into()),
             }
         } else {
             match cmd_id as u32 {
                 CMD_ID_DELETE => MenuAction::Delete,
+                CMD_ID_DELETE_NO_KILL => MenuAction::DeleteNoKill,
                 CMD_ID_UNLOCK => MenuAction::Unlock,
                 _ => return Err(E_INVALIDARG.into()),
             }
@@ -169,6 +192,7 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
 
         let verb = match idcmd as u32 {
             CMD_ID_DELETE => VERB_DELETE,
+            CMD_ID_DELETE_NO_KILL => VERB_DELETE_NO_KILL,
             CMD_ID_UNLOCK => VERB_UNLOCK,
             _ => return Err(E_INVALIDARG.into()),
         };
@@ -206,6 +230,7 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
 
 enum MenuAction {
     Delete,
+    DeleteNoKill,
     Unlock,
 }
 
@@ -221,6 +246,7 @@ fn build_command_line(exe_path: &str, paths: &[PathBuf], action: &MenuAction) ->
     match action {
         // -r is harmless for files and required for directories.
         MenuAction::Delete => format!("\"{}\" -r --gui --kill-processes {}", exe_path, list),
+        MenuAction::DeleteNoKill => format!("\"{}\" -r --gui {}", exe_path, list),
         MenuAction::Unlock => format!("\"{}\" --unlock --gui {}", exe_path, list),
     }
 }
