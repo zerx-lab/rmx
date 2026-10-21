@@ -21,6 +21,8 @@ const VERB_DELETE: &str = "rmxdelete";
 const VERB_UNLOCK: &str = "rmxunlock";
 const CMD_ID_DELETE: u32 = 0;
 const CMD_ID_UNLOCK: u32 = 1;
+/// The menu is built for the target of a shortcut, not for the shortcut itself.
+const CMF_VERBSONLY: u32 = 0x00000002;
 
 #[implement(IShellExtInit, IContextMenu)]
 pub struct RmxContextMenu {
@@ -87,8 +89,15 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
         indexmenu: u32,
         idcmdfirst: u32,
         _idcmdlast: u32,
-        _uflags: u32,
+        uflags: u32,
     ) -> windows::core::Result<()> {
+        // CMF_VERBSONLY means the shell resolved a shortcut and builds this menu
+        // for its target, so the data object holds the target, not the .lnk.
+        // Deleting it would remove the wrong file, so rmx offers nothing here.
+        if uflags & CMF_VERBSONLY != 0 {
+            return Ok(());
+        }
+
         unsafe {
             InsertMenuW(
                 hmenu,
@@ -141,11 +150,8 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
         }
 
         let exe_path = get_rmx_exe_path()?;
-
-        for path in paths.iter() {
-            let cmdline = build_command_line(&exe_path, path, &action);
-            spawn_detached_process(&cmdline);
-        }
+        let cmdline = build_command_line(&exe_path, paths.as_slice(), &action);
+        spawn_detached_process(&cmdline);
 
         Ok(())
     }
@@ -203,23 +209,19 @@ enum MenuAction {
     Unlock,
 }
 
-fn build_command_line(exe_path: &str, path: &PathBuf, action: &MenuAction) -> String {
-    let path_str = path.to_string_lossy();
+/// Builds one command line for the whole selection, so rmx shows a single
+/// confirmation dialog instead of one per path.
+fn build_command_line(exe_path: &str, paths: &[PathBuf], action: &MenuAction) -> String {
+    let list = paths
+        .iter()
+        .map(|path| format!("\"{}\"", path.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     match action {
-        MenuAction::Delete => {
-            let flag = if path.is_dir() { "-r" } else { "" };
-            if flag.is_empty() {
-                format!("\"{}\" --gui --kill-processes \"{}\"", exe_path, path_str)
-            } else {
-                format!(
-                    "\"{}\" {} --gui --kill-processes \"{}\"",
-                    exe_path, flag, path_str
-                )
-            }
-        }
-        MenuAction::Unlock => {
-            format!("\"{}\" --unlock --gui \"{}\"", exe_path, path_str)
-        }
+        // -r is harmless for files and required for directories.
+        MenuAction::Delete => format!("\"{}\" -r --gui --kill-processes {}", exe_path, list),
+        MenuAction::Unlock => format!("\"{}\" --unlock --gui {}", exe_path, list),
     }
 }
 

@@ -945,6 +945,14 @@ fn expand_globs(paths: &[PathBuf], force: bool) -> Vec<PathBuf> {
             continue;
         }
 
+        // A name with glob characters can still be a real file: Windows forbids
+        // `*` and `?` in names, but `[` is legal (for example "backup [1].zip").
+        // Prefer the literal path when it exists and use the pattern otherwise.
+        if rmx::winapi::literal_path_exists(path) {
+            expanded.push(path.clone());
+            continue;
+        }
+
         match glob(&path_str) {
             Ok(entries) => {
                 let mut matched = false;
@@ -1067,7 +1075,7 @@ fn unlock_directory_gui(path: &Path) -> Result<(), Error> {
             }
         }
 
-        all_locking_procs.sort_by(|a, b| a.pid.cmp(&b.pid));
+        all_locking_procs.sort_by_key(|a| a.pid);
         all_locking_procs.dedup_by(|a, b| a.pid == b.pid);
     }
 

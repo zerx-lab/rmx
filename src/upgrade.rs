@@ -103,11 +103,9 @@ pub fn run_upgrade(check_only: bool, force: bool) -> anyhow::Result<()> {
     let latest_version = release.tag_name.trim_start_matches('v');
     println!("v{}", latest_version);
 
-    if !force {
-        if is_up_to_date(current_version, latest_version) {
-            println!("rmx: already up to date");
-            return Ok(());
-        }
+    if !force && is_up_to_date(current_version, latest_version) {
+        println!("rmx: already up to date");
+        return Ok(());
     }
 
     if check_only {

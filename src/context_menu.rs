@@ -117,6 +117,17 @@ fn register_shell(dll_path: &std::path::Path) -> io::Result<()> {
         set_reg_value(hkey, None, CLSID_STR)?;
         let _ = RegCloseKey(hkey);
 
+        // 5. 注册 Shortcut context menu handler: for a .lnk the shell asks the
+        // file type for the shortcut's own verbs, where the selection holds the
+        // shortcut itself instead of its target.
+        let lnk_handler_key = format!(
+            "Software\\Classes\\lnkfile\\shellex\\ContextMenuHandlers\\{}",
+            EXTENSION_NAME
+        );
+        let hkey = create_reg_key(&lnk_handler_key)?;
+        set_reg_value(hkey, None, CLSID_STR)?;
+        let _ = RegCloseKey(hkey);
+
         // 通知 Explorer 刷新
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
     }
@@ -150,6 +161,10 @@ fn unregister_shell() -> io::Result<()> {
         ));
         delete_reg_tree(&format!(
             "Software\\Classes\\*\\shellex\\ContextMenuHandlers\\{}",
+            EXTENSION_NAME
+        ));
+        delete_reg_tree(&format!(
+            "Software\\Classes\\lnkfile\\shellex\\ContextMenuHandlers\\{}",
             EXTENSION_NAME
         ));
         delete_reg_tree(&format!(

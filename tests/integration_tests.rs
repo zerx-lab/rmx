@@ -324,3 +324,55 @@ fn test_directory_requires_recursive() {
     assert!(test_dir.exists(), "Directory should still exist");
     fs::remove_dir_all(&test_dir).ok();
 }
+
+#[test]
+fn test_brackets_in_filename() {
+    let test_dir = create_test_dir("brackets");
+    let file_path = test_dir.join("backup [1].zip");
+    fs::write(&file_path, b"data").unwrap();
+
+    let output = Command::new(rmx_path())
+        .args(["-f"])
+        .arg(&file_path)
+        .output()
+        .expect("Failed to execute rmx");
+
+    assert!(output.status.success());
+    assert!(
+        !file_path.exists(),
+        "Literal name with brackets should be deleted"
+    );
+
+    fs::remove_dir_all(&test_dir).ok();
+}
+
+#[test]
+fn test_glob_with_brackets() {
+    let test_dir = create_test_dir("brackets_glob");
+    for name in ["build_1.txt", "build_2.txt", "build_x.txt"] {
+        fs::write(test_dir.join(name), b"data").unwrap();
+    }
+
+    let pattern = test_dir.join("build_[0-9].txt");
+    let output = Command::new(rmx_path())
+        .args(["-f"])
+        .arg(&pattern)
+        .output()
+        .expect("Failed to execute rmx");
+
+    assert!(output.status.success());
+    assert!(
+        !test_dir.join("build_1.txt").exists(),
+        "build_1.txt should match the pattern"
+    );
+    assert!(
+        !test_dir.join("build_2.txt").exists(),
+        "build_2.txt should match the pattern"
+    );
+    assert!(
+        test_dir.join("build_x.txt").exists(),
+        "build_x.txt should not match the pattern"
+    );
+
+    fs::remove_dir_all(&test_dir).ok();
+}
