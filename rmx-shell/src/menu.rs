@@ -53,6 +53,7 @@ const VERB_UNLOCK: &str = "rmxunlock";
 const CMD_ID_DELETE: u32 = 0;
 const CMD_ID_DELETE_NO_KILL: u32 = 1;
 const CMD_ID_UNLOCK: u32 = 2;
+const MENU_ITEM_COUNT: u32 = CMD_ID_UNLOCK + 1;
 /// The menu is built for the target of a shortcut, not for the shortcut itself.
 const CMF_VERBSONLY: u32 = 0x00000002;
 
@@ -120,7 +121,7 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
         hmenu: HMENU,
         indexmenu: u32,
         idcmdfirst: u32,
-        _idcmdlast: u32,
+        idcmdlast: u32,
         uflags: u32,
     ) -> windows::core::Result<()> {
         // CMF_VERBSONLY means the shell resolved a shortcut and builds this menu
@@ -130,44 +131,41 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
             return Ok(());
         }
 
+        // The popup takes three consecutive ids, so Explorer must give us room
+        // for all of them.
+        if !has_room(idcmdfirst, idcmdlast) {
+            return Ok(());
+        }
+
         let texts = MenuTexts::for_language(Lang::current());
 
         unsafe {
             let submenu = CreatePopupMenu()?;
-            InsertMenuW(
-                submenu,
-                0,
-                MF_STRING | MF_BYPOSITION,
-                (idcmdfirst + CMD_ID_DELETE) as usize,
-                texts.delete,
-            )?;
-            InsertMenuW(
-                submenu,
-                1,
-                MF_STRING | MF_BYPOSITION,
-                (idcmdfirst + CMD_ID_DELETE_NO_KILL) as usize,
-                texts.delete_no_kill,
-            )?;
-            InsertMenuW(
-                submenu,
-                2,
-                MF_STRING | MF_BYPOSITION,
-                (idcmdfirst + CMD_ID_UNLOCK) as usize,
-                texts.unlock,
-            )?;
-            InsertMenuW(
+
+            if let Err(error) = insert_commands(submenu, idcmdfirst, &texts) {
+                // Report the original error, not the cleanup result.
+                let _ = DestroyMenu(submenu);
+                return Err(error);
+            }
+
+            // The system owns the popup only after a successful insert.
+            if let Err(error) = InsertMenuW(
                 hmenu,
                 indexmenu,
                 MF_STRING | MF_BYPOSITION | MF_POPUP,
                 submenu.0 as usize,
                 texts.submenu,
-            )?;
+            ) {
+                // Report the original error, not the cleanup result.
+                let _ = DestroyMenu(submenu);
+                return Err(error);
+            }
         }
 
         // The submenu holds three items, so three ids are taken from the range
         // Explorer gave us. The count must match them: with 2 the clicks on the
         // items fall through to Explorer's own commands.
-        Err(Error::from(HRESULT(3)))
+        Err(Error::from(HRESULT(MENU_ITEM_COUNT as i32)))
     }
 
     fn InvokeCommand(&self, pici: *const CMINVOKECOMMANDINFO) -> windows::core::Result<()> {
@@ -256,6 +254,45 @@ impl IContextMenu_Impl for RmxContextMenu_Impl {
 
         Ok(())
     }
+}
+
+/// Reports whether Explorer gave the menu enough consecutive command ids.
+fn has_room(idcmdfirst: u32, idcmdlast: u32) -> bool {
+    idcmdfirst
+        .checked_add(MENU_ITEM_COUNT - 1)
+        .is_some_and(|last_id| idcmdlast >= last_id)
+}
+
+/// Inserts the three commands into the popup menu.
+fn insert_commands(
+    submenu: HMENU,
+    idcmdfirst: u32,
+    texts: &MenuTexts,
+) -> windows::core::Result<()> {
+    unsafe {
+        InsertMenuW(
+            submenu,
+            0,
+            MF_STRING | MF_BYPOSITION,
+            (idcmdfirst + CMD_ID_DELETE) as usize,
+            texts.delete,
+        )?;
+        InsertMenuW(
+            submenu,
+            1,
+            MF_STRING | MF_BYPOSITION,
+            (idcmdfirst + CMD_ID_DELETE_NO_KILL) as usize,
+            texts.delete_no_kill,
+        )?;
+        InsertMenuW(
+            submenu,
+            2,
+            MF_STRING | MF_BYPOSITION,
+            (idcmdfirst + CMD_ID_UNLOCK) as usize,
+            texts.unlock,
+        )?;
+    }
+    Ok(())
 }
 
 enum MenuAction {
@@ -348,4 +385,34 @@ fn get_rmx_exe_path() -> Result<String> {
     }
 
     Err(E_FAIL.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn has_room_accepts_exactly_three_ids() {
+        assert!(has_room(10, 12));
+    }
+
+    #[test]
+    fn has_room_rejects_two_ids() {
+        assert!(!has_room(10, 11));
+    }
+
+    #[test]
+    fn has_room_rejects_empty_range() {
+        assert!(!has_room(10, 9));
+    }
+
+    #[test]
+    fn has_room_accepts_last_three_ids() {
+        assert!(has_room(u32::MAX - 2, u32::MAX));
+    }
+
+    #[test]
+    fn has_room_rejects_wrapping_addition() {
+        assert!(!has_room(u32::MAX - 1, u32::MAX));
+    }
 }

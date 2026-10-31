@@ -198,9 +198,32 @@ rmx 会自动检测安装方式（Scoop、Cargo、npm）。对于手动安装的
 rmx init
 ```
 
-初始化后，右键点击任意文件或文件夹即可看到"Delete with rmx"选项。
+初始化后，右键点击任意文件或文件夹即可看到"用 rmx 删除"子菜单，其中包含"删除"、"删除（不结束进程）"和"解锁"三个选项。
 
 **注意：** 运行 init 命令需要以管理员身份运行 PowerShell 或 CMD。
+
+### 界面语言
+
+进度、确认、错误和解锁窗口跟随 `--lang`：
+
+```bash
+# 使用英语
+rmx --gui --lang en -r ./node_modules
+
+# 使用中文
+rmx --gui --lang zh -r ./node_modules
+
+# 先读设置值，再跟随 Windows 界面语言（默认）
+rmx --gui --lang auto -r ./node_modules
+```
+
+资源管理器右键菜单跟随 `HKCU\Software\rmx\Settings` 中的 `Language` 值；没有该值时跟随 Windows 界面语言。设置该值可以改变右键菜单的语言：
+
+```powershell
+reg add "HKCU\Software\rmx\Settings" /v Language /t REG_SZ /d en /f
+```
+
+`--lang auto`（默认）让窗口先读 `Language` 值，再跟随 Windows 界面语言。`--lang zh` 或 `--lang en` 仅覆盖窗口的语言。没有可识别的 `Language` 值时，中文 Windows 显示中文，其他语言显示英语。无论使用哪种语言，命令行输出始终为英语。
 
 ## ⚙️ 命令选项
 
@@ -215,6 +238,7 @@ rmx init
 | `--no-preserve-root` | 不特殊处理根目录 |
 | `--kill-processes` | 终止占用文件/文件夹的进程，然后删除它们 |
 | `--unlock` | 仅解除文件/文件夹的占用（关闭句柄），不删除 |
+| `--lang <LANG>` | 界面语言：`zh`、`en` 或 `auto`（先读设置值，再跟随 Windows 界面语言；默认） |
 
 ### 子命令
 

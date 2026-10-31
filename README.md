@@ -198,14 +198,13 @@ Initialize rmx shell extension for Windows Explorer right-click menu:
 rmx init
 ```
 
-After initialization, right-click any file or folder to see "Delete with rmx" option.
+After initialization, right-click any file or folder to see the "Delete with rmx" submenu with "Delete", "Delete (no process kill)" and "Unlock".
 
 **Note:** Run PowerShell or CMD as Administrator for the init command.
 
 ### Interface Language
 
-The progress, confirmation, error and unlock windows and the Explorer menu follow
-the interface language:
+The progress, confirmation, error and unlock windows follow `--lang`:
 
 ```bash
 # Use English
@@ -214,19 +213,23 @@ rmx --gui --lang en -r ./node_modules
 # Use Chinese
 rmx --gui --lang zh -r ./node_modules
 
-# Follow the Windows interface language (default)
+# Follow the settings key, then the Windows interface language (default)
 rmx --gui --lang auto -r ./node_modules
 ```
 
-With `auto`, a Chinese Windows shows Chinese and every other language shows
-English. The `Language` value in `HKCU\Software\rmx\Settings` applies when the
-flag is `auto`, and the flag overrides it:
+The Explorer menu follows the `Language` value in
+`HKCU\Software\rmx\Settings`, and then the Windows UI language. Set that value
+to change the menu language:
 
 ```powershell
 reg add "HKCU\Software\rmx\Settings" /v Language /t REG_SZ /d en /f
 ```
 
-The command line output stays English in every language.
+With `auto` (the default), the windows use the same order as the menu.
+Without a recognized `Language` value, a Chinese Windows shows Chinese and
+every other language shows English. The `--lang zh` and `--lang en` values
+override the setting for the windows only. The command line output stays
+English in every language.
 
 ## ⚙️ Options
 
@@ -241,7 +244,7 @@ The command line output stays English in every language.
 | `--no-preserve-root` | Do not treat '/' specially |
 | `--kill-processes` | Terminate processes locking files/directories, then delete them |
 | `--unlock` | Only unlock files/directories (close handles) without deleting |
-| `--lang <LANG>` | Interface language: `zh`, `en` or `auto` (the Windows UI language, default) |
+| `--lang <LANG>` | Interface language: `zh`, `en` or `auto` (the settings key, then the Windows UI language; default) |
 
 ### Subcommands
 
