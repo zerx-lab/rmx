@@ -4,6 +4,12 @@
 //! and the shell DLL is loaded into Explorer, so a file next to the binary
 //! cannot be read. Each language has its own module with a [`Strings`] table,
 //! so a missing translation is a compile error.
+//!
+//! `rmx-shell/src/lang.rs` holds a copy of [`Lang`] and of the settings read,
+//! because the shell DLL cannot link this crate. When you add a language,
+//! change both files.
+
+use std::fmt::Write as _;
 
 mod en;
 mod zh;
@@ -171,7 +177,8 @@ pub fn fill(template: &str, values: &[&dyn std::fmt::Display]) -> String {
         match rest.split_once("{}") {
             Some((head, tail)) => {
                 filled.push_str(head);
-                filled.push_str(&value.to_string());
+                // Writing to a String cannot fail.
+                let _ = write!(filled, "{}", value);
                 rest = tail;
             }
             None => break,

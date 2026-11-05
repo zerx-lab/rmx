@@ -110,7 +110,7 @@ struct Args {
         long = "lang",
         value_name = "LANG",
         default_value = "auto",
-        help = "Interface language: zh, en or auto (the Windows UI language)"
+        help = "Interface language: zh, en or auto (the settings key, then the Windows UI language)"
     )]
     lang: LangChoice,
 
@@ -123,7 +123,8 @@ struct Args {
     confirmed: bool,
 }
 
-/// Value of `--lang`: a language code, or `auto` for the Windows UI language.
+/// Value of `--lang`: a language code, or `auto` to follow the settings key and
+/// then the Windows UI language.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum LangChoice {
     Zh,
@@ -989,6 +990,7 @@ fn resolve_lang(choice: LangChoice) -> Lang {
 }
 
 /// The `Language` value of the settings key, when it holds a known code.
+/// The Explorer menu reads the same value in `rmx-shell/src/lang.rs`.
 #[cfg(windows)]
 fn language_setting() -> Option<Lang> {
     read_language().and_then(|code| Lang::from_code(&code))

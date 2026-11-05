@@ -4,6 +4,10 @@
 //! Explorer, so the set is picked when the menu is built. The `Language` value
 //! of the settings key decides; without it the Windows UI language decides, and
 //! languages rmx does not ship get English.
+//!
+//! `src/i18n.rs` and `src/main.rs` in the rmx crate hold the same code, because
+//! this DLL cannot link that crate. When you add a language, change this file
+//! and those two together.
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
